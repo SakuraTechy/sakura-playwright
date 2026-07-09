@@ -46,6 +46,9 @@ export class ApiClient {
 
   getTestCase(id) { return this.request('GET', `/testcases/${id}?raw_values=1`); }
   saveSteps(id, steps) { return this.request('POST', `/testcases/${id}/steps`, { steps }); }
+  importRecording(payload) {
+    return this.request('POST', '/automation/automationUiScene/recordings/import', payload, { timeoutMs: 60000 });
+  }
   /**
    * 保存执行结果（30s 超时 + 1 次重试），避免大 payload 间歇性失败导致结果丢失。
    * 仅对超时和网络错误重试，业务错误（code !== 0）不重试。

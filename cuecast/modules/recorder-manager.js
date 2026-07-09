@@ -30,6 +30,7 @@ export class RecorderManager {
       recordingOpenedNewTab: this.state.recordingOpenedNewTab === true,
       recordingWindowId: this.state.recordingWindowId ?? null,
       recordingScreenshotMode: this.state.recordingScreenshotMode || 'standard',
+      recordingImport: this.state.recordingImport || null,
       recordingPaused: this.state.recordingPaused === true,
       recordedSteps: Array.isArray(this.state.recordedSteps) ? [...this.state.recordedSteps] : [],
       insertAfterIndex: this._insertAfterIndex,
@@ -124,6 +125,7 @@ export class RecorderManager {
       this.state.recordingScreenshotMode = String(session.recordingScreenshotMode || 'standard').trim().toLowerCase() === 'full_hd'
         ? 'full_hd'
         : 'standard';
+      this.state.recordingImport = session.recordingImport || null;
       this.state.recordingPaused = session.recordingPaused === true;
       this.state.recordingStartedAt = Number(session.savedAt || Date.now()) || Date.now();
       this.state.recordedSteps = Array.isArray(session.recordedSteps) ? [...session.recordedSteps] : [];
@@ -193,6 +195,42 @@ export class RecorderManager {
     return [...head, ...recorded, ...tail];
   }
 
+  _getRecordingImportOptions(recordingImport = this.state.recordingImport) {
+    const options = recordingImport;
+    if (!options || typeof options !== 'object' || options.enabled !== true) return null;
+    if (!options.scene || typeof options.scene !== 'object') return null;
+    return options;
+  }
+
+  _buildRecordingImportPayload(testCaseId, steps, options) {
+    const scene = options.scene;
+    return {
+      mode: 'createScene',
+      scene,
+      recordedCase: {
+        id: testCaseId,
+        name: options.caseName || scene.name || `录制用例 ${testCaseId || ''}`.trim(),
+        start_url: options.startUrl || '',
+        description: options.caseDescription || 'Chrome 扩展录制生成',
+        screenshot_mode: this.state.recordingScreenshotMode || 'standard',
+        window_size_mode: options.windowSizeMode || 'maximized',
+        viewport_width: options.viewportWidth,
+        viewport_height: options.viewportHeight,
+        steps,
+      },
+      persistScreenshots: options.persistScreenshots === true,
+      keepRawScreenshotInStep: options.keepRawScreenshotInStep === true,
+    };
+  }
+
+  async _saveRecordedSteps(testCaseId, steps, recordingImport = this.state.recordingImport) {
+    const importOptions = this._getRecordingImportOptions(recordingImport);
+    if (importOptions) {
+      return this.api.importRecording(this._buildRecordingImportPayload(testCaseId, steps, importOptions));
+    }
+    return this.api.saveSteps(testCaseId, steps);
+  }
+
   _broadcastToContentScripts(message) {
     chrome.tabs.query({}, (tabs) => {
       for (const tab of tabs) {
@@ -259,6 +297,7 @@ export class RecorderManager {
     this.state.recordingOpenedNewTab = false;
     this.state.recordingWindowId = null;
     this.state.recordingScreenshotMode = 'standard';
+    this.state.recordingImport = options.recordingImport || null;
     this.state.recordingPaused = false;
     this.state.recordingStartedAt = Date.now();
     this.state.currentTabId = null;
@@ -328,6 +367,7 @@ export class RecorderManager {
       this.state.recordingOpenedNewTab = false;
       this.state.recordingWindowId = null;
       this.state.recordingScreenshotMode = 'standard';
+      this.state.recordingImport = null;
       this.state.recordingPaused = false;
       this.state.recordingStartedAt = 0;
       this._clearMergeContext();
@@ -462,6 +502,7 @@ export class RecorderManager {
 
     const recorded = [...this.state.recordedSteps];
     const testCaseId = this.state.testCaseId;
+    const recordingImport = this.state.recordingImport;
     const toSave = this._mergeRecordedWithSnapshot(recorded);
     this._clearMergeContext();
     this.state.mode = 'idle';
@@ -469,13 +510,14 @@ export class RecorderManager {
     this.state.recordingOpenedNewTab = false;
     this.state.recordingWindowId = null;
     this.state.recordingScreenshotMode = 'standard';
+    this.state.recordingImport = null;
     this.state.recordingPaused = false;
     this.state.recordingStartedAt = 0;
 
     let saved = false;
     if (testCaseId && toSave && toSave.length > 0) {
       try {
-        await this.api.saveSteps(testCaseId, toSave);
+        await this._saveRecordedSteps(testCaseId, toSave, recordingImport);
         saved = true;
         await this._clearSessionDraft();
         const msg =
@@ -545,6 +587,7 @@ export class RecorderManager {
     this.state.recordingOpenedNewTab = false;
     this.state.recordingWindowId = null;
     this.state.recordingScreenshotMode = 'standard';
+    this.state.recordingImport = null;
     this.state.recordingPaused = false;
     this.state.recordingStartedAt = 0;
     await this._clearSessionDraft();
@@ -576,6 +619,7 @@ export class RecorderManager {
 
     const recorded = [...this.state.recordedSteps];
     const testCaseId = this.state.testCaseId;
+    const recordingImport = this.state.recordingImport;
     const recordingWindowId = this.state.recordingWindowId;
     const toSave = this._mergeRecordedWithSnapshot(recorded);
     this._clearMergeContext();
@@ -584,13 +628,14 @@ export class RecorderManager {
     this.state.recordingOpenedNewTab = false;
     this.state.recordingWindowId = null;
     this.state.recordingScreenshotMode = 'standard';
+    this.state.recordingImport = null;
     this.state.recordingPaused = false;
     this.state.recordingStartedAt = 0;
 
     let saved = false;
     if (testCaseId && toSave && toSave.length > 0) {
       try {
-        await this.api.saveSteps(testCaseId, toSave);
+        await this._saveRecordedSteps(testCaseId, toSave, recordingImport);
         saved = true;
         await this._clearSessionDraft();
         this._showNotification('录制标签页已关闭', `已保存 ${toSave.length} 个操作步骤`);

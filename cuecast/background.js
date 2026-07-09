@@ -18,6 +18,7 @@ const state = {
   recordingOpenedNewTab: false,
   recordingWindowId: null,
   recordingScreenshotMode: 'standard',
+  recordingImport: null,
   recordingPaused: false,
   recordingStartedAt: 0,
   activePlayCount: 0,
@@ -212,6 +213,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         .start(message.testCaseId, message.startUrl, tabId, {
           insertAfterStepIndex: message.insertAfterStepIndex,
           screenshotMode: message.screenshotMode,
+          recordingImport: message.recordingImport,
         })
         .then((response) => {
           if (response?.ok) {
