@@ -1,0 +1,20 @@
+{
+  "name": "cuecast-playwright-runner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "M1 Playwright runner for CueCast recorded steps.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "run:case": "node src/index.js",
+    "run:batch": "node src/batch.js",
+    "export:playwright": "node src/export-playwright.js",
+    "export:pytest": "node src/export-pytest.js",
+    "check": "node --check playwright.config.js && node --check src/index.js && node --check src/batch.js && node --check src/export-playwright.js && node --check src/export-pytest.js && node --check src/api-client.js && node --check src/case-loader.js && node --check src/step-runner.js && node --check src/locator-resolver.js && node --check src/result-reporter.js && node --check src/artifacts.js && node --check src/utils.js"
+  },
+  "dependencies": {
+    "playwright": "1.61.1"
+  }
+}

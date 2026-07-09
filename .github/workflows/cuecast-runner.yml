@@ -1,0 +1,67 @@
+name: CueCast Runner Regression
+
+on:
+  workflow_dispatch:
+    inputs:
+      case_ids:
+        description: Mock case IDs to run
+        required: false
+        default: "278,279"
+      workers:
+        description: Runner worker count
+        required: false
+        default: "1"
+  schedule:
+    - cron: "0 18 * * *"
+
+jobs:
+  mock-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CUECAST_API_BASE: http://127.0.0.1:4173/api
+      CUECAST_CASE_IDS: ${{ github.event.inputs.case_ids || '278,279' }}
+      RUNNER_WORKERS: ${{ github.event.inputs.workers || '1' }}
+      RUNNER_TRACE: retain-on-failure
+      RUNNER_VIDEO: retain-on-failure
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: playwright-runner/package-lock.json
+
+      - run: npm --prefix playwright-runner ci
+
+      - run: npm --prefix playwright-runner exec playwright install --with-deps chromium
+
+      - name: Start mock lab
+        shell: bash
+        run: |
+          node test-lab/mock-server.js --port 4173 &
+          echo $! > mock-server.pid
+          for i in {1..30}; do
+            curl -fsS http://127.0.0.1:4173/api/extension/version && exit 0
+            sleep 1
+          done
+          exit 1
+
+      - name: Reset mock cases
+        shell: bash
+        run: |
+          for id in 278 279 280; do
+            curl -fsS -X POST "http://127.0.0.1:4173/api/testcases/${id}/reset"
+          done
+
+      - name: Run batch regression
+        run: npm --prefix playwright-runner run run:batch -- --case-ids "$CUECAST_CASE_IDS" --api-base "$CUECAST_API_BASE" --workers "$RUNNER_WORKERS"
+
+      - name: Upload runner artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-runner-artifacts
+          path: playwright-runner-artifacts
+          if-no-files-found: warn

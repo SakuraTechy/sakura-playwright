@@ -1,0 +1,461 @@
+# Playwright Runner 阶段完成情况
+
+本文档用于记录 `docs/playwright-runner-hybrid-implementation.md` 中每个阶段的完成情况，方便把计划方案与实际落地逐项对比。
+
+维护规则：
+
+- 每个阶段完成后必须更新对应章节。
+- 每个验收项都要写清楚状态、验证命令、验证结果和产物路径。
+- 未完成或部分完成的能力要写入遗留问题，作为下一阶段输入。
+- 不提交生成产物，只记录产物路径和关键结论。
+
+状态说明：
+
+| 状态 | 含义 |
+| --- | --- |
+| `未开始` | 尚未进入实现或验证 |
+| `进行中` | 已开始实现，但未达到阶段验收标准 |
+| `待验证` | 代码基本完成，等待端到端验证 |
+| `通过` | 已满足该阶段验收标准 |
+| `部分通过` | 分批目标已通过，完整阶段仍有缺口 |
+| `阻塞` | 由于环境、依赖或设计问题暂时无法继续 |
+
+## 总览
+
+| 阶段 | 目标 | 当前状态 | 完成记录 |
+| --- | --- | --- | --- |
+| M1 | 最小 Runner 可用 | 通过 | 本地 mock case 278 已通过 |
+| M2 | 定位能力增强 | 部分通过 | 分批能力已完成并通过 mock 验证 |
+| M3 | 报告和中台集成 | 部分通过 | 本地报告、artifact 管理、mock 中台 Runner job 已通过 |
+| M4 | CI 和批量执行 | 通过 | 批量入口、mock 批量 job API、CI 模板已实现并通过本地 mock 验收 |
+| M5 | 高级能力 | 部分通过 | M5-A 至 M5-O 已完成 iframe、文件上传、多文件上传、隐藏上传代理、下载断言、高级下载校验、二进制下载校验、JSON/API、Monaco 输入、Monaco 快捷键、树定位、展开/复选树、多窗口基础切换、多窗口显式切换和关闭、多 popup 选择、网络 mock、类 HAR 回放、请求断言、响应断言、响应快照、快照基线对比、请求数量断言、失败注入专项 case、Playwright/pytest 脚本导出、复杂定位导出、高级动作导出和导出 Playwright 端到端执行并通过 mock 验收 |
+
+## M1：最小 Runner 可用
+
+### 计划目标
+
+M1 目标是验证 Playwright Runner 执行通道是否可行。第一阶段不修改现有 Chrome 扩展录制和回放逻辑。
+
+### 完成情况
+
+| 计划交付 | 实际完成情况 | 状态 | 说明 |
+| --- | --- | --- | --- |
+| 新增 `playwright-runner/` | 已新增 Node ESM 项目、Playwright 配置和 Runner 源码 | 通过 | 包含 `package.json`、`playwright.config.js`、`src/` |
+| 不修改现有扩展运行逻辑 | Runner 作为独立目录存在 | 通过 | 未替换 `cuecast` 内 CDP 回放 |
+| CLI 可根据 `case_id` 拉取用例 | 已实现 `--case-id`、`--api-base` 等参数 | 通过 | 入口为 `playwright-runner/src/index.js` |
+| 支持 Chromium headless 执行 | 已通过本地 headless 验证 | 通过 | mock case 278 通过 |
+| 支持基础动作 | 已支持 `navigate/click/input/key/wait/assert_text`，并额外支持 `double_click/right_click/hover/scroll` | 通过 | 见 `playwright-runner/src/step-runner.js` |
+| 支持基础定位 | 已支持 CSS、XPath、text exact、部分 `locator_meta.candidates` | 通过 | 见 `playwright-runner/src/locator-resolver.js` |
+| 失败截图和 `result.json` | 已实现 `result.json`、`failure.png`、`failure.html` | 通过 | case 280 验证了失败产物 |
+| 回传基础执行结果 | 已实现 `POST /testcases/{id}/results` | 通过 | mock server 接收执行结果 |
+
+### 已执行验证
+
+| 时间 | 命令 | 结果 | 产物 |
+| --- | --- | --- | --- |
+| 2026-07-04 | `npm --prefix playwright-runner run check` | 通过 | 无 |
+| 2026-07-04 | `node playwright-runner/src/index.js --case-id 278 --api-base http://127.0.0.1:4174/api --headed false` | 通过 | `playwright-runner-artifacts/runs/278-20260704-165349/` |
+
+### 阶段结论
+
+结论：`通过`。
+
+M1 已完成，可以进入后续定位能力增强。
+
+## M2：定位能力增强
+
+### 计划目标
+
+- 优先使用 `locator_meta.candidates`。
+- 增强表格上下文定位。
+- 增强弹窗、浮层、下拉菜单定位。
+- 支持 text exact/tag 定位。
+- 支持 Ant Select / Element Select 基础选择。
+- 在结果中记录 `locator_source`。
+
+### 本轮分批目标
+
+- 扩展候选类型：`css_attr_name`、`css_attr_aria-label`、`css_attr_placeholder`、`table_cell_css`、`table_cell_xpath`。
+- 支持表格上下文定位，按 `wrapper_index`、`row_index`、`col_index` 收敛到 cell。
+- 支持弹窗/浮层容器内收敛，避免点击页面外同名元素。
+- 支持 Ant/Element 风格自定义 select 的基础输入。
+- 成功 step 记录 `locator_source`、`locator_type`、`matched_count`、`visible_count`。
+- 失败 step 记录 `error_code`、`locator_source`、`locator_type` 和候选摘要。
+
+### 完成情况
+
+| 计划交付 | 实际完成情况 | 状态 | 说明 |
+| --- | --- | --- | --- |
+| `locator_meta.candidates` 优先级扩展 | 已扩展本轮候选类型并保持高分优先 | 部分通过 | 树、Monaco、iframe 等候选仍待后续 |
+| 表格上下文定位 | 已支持 mock 表格 cell 内定位 | 通过 | case 279 step 1 使用 `table:locator_meta.candidates[0]` |
+| 弹窗/浮层定位 | 已支持可见 overlay 内收敛 | 通过 | case 279 step 4 使用 `overlay:locator_meta.candidates[0]` |
+| 文本 exact/tag 定位 | 已支持 `text_exact` 和 `text_exact_tag` | 通过 | 歧义场景会明确失败 |
+| Ant/Element Select 基础支持 | 已支持 Ant/Element 风格自定义下拉按文本选择 | 部分通过 | 已覆盖基础 mock，下游真实组件仍需验证 |
+| `locator_source` 记录 | 成功和失败结果均已记录 | 通过 | case 279、280 已验证 |
+
+### 已执行验证
+
+| 时间 | 命令 | 结果 | 产物 |
+| --- | --- | --- | --- |
+| 2026-07-04 | `npm --prefix playwright-runner run check` | 通过 | 无 |
+| 2026-07-04 | `node playwright-runner/src/index.js --case-id 278 --api-base http://127.0.0.1:4174/api --headed false` | 通过，M1 回归未破坏 | `playwright-runner-artifacts/runs/278-20260704-165349/` |
+| 2026-07-04 | `node playwright-runner/src/index.js --case-id 279 --api-base http://127.0.0.1:4174/api --headed false` | 通过，覆盖表格、浮层、自定义 select | `playwright-runner-artifacts/runs/279-20260704-165405/` |
+| 2026-07-04 | `node playwright-runner/src/index.js --case-id 280 --api-base http://127.0.0.1:4174/api --headed false` | 按预期失败，返回 `LOCATOR_AMBIGUOUS` | `playwright-runner-artifacts/runs/280-20260704-165414/` |
+
+### 遗留问题
+
+- 真实业务用例 70% 步骤通过率尚未验证。
+- 表格定位当前覆盖基础 row/col/cell 场景，复杂固定列、虚拟滚动、树形表格仍需后续补强。
+- Ant/Element Select 当前覆盖基础可见下拉选项，远程搜索、多选、虚拟列表仍需后续补强。
+- 树组件、Monaco、iframe、多窗口、文件上传下载仍按计划放到 M5 或专项阶段。
+
+### 阶段结论
+
+结论：`部分通过`。
+
+M2 分批目标已完成并通过本地 mock 验证；完整 M2 仍需结合真实业务用例继续补齐。
+
+## M3：报告和中台集成
+
+### 计划目标
+
+- Runner 执行模式接入中台。
+- trace/video/screenshot artifact 管理。
+- 执行结果统一展示。
+- 支持异步任务状态。
+
+### 完成情况
+
+| 计划交付 | 实际完成情况 | 状态 | 说明 |
+| --- | --- | --- | --- |
+| 中台 Runner 回放入口 | test-lab 新增 `Runner 回放` 按钮，mock API 支持创建 Runner job | 部分通过 | 真实中台接入未做 |
+| trace/video/screenshot 管理 | Runner 支持 `retain-on-failure`，失败时保留 trace、video、screenshot、HTML、DOM 文本 | 通过 | case 280 已验证 |
+| 执行结果统一展示 | 执行历史可展开 `Runner report`，展示失败步骤、定位来源和 artifact 链接 | 部分通过 | mock 中台已完成，真实中台未接 |
+| 异步任务状态 | mock API 支持 `/api/runner/jobs` 创建和查询 queued/running/passed/failed 状态 | 部分通过 | 当前为本地内存 job |
+
+### 已执行验证
+
+| 时间 | 命令 | 结果 | 产物 |
+| --- | --- | --- | --- |
+| 2026-07-04 | `npm --prefix playwright-runner run check` | 通过 | 无 |
+| 2026-07-04 | `node --check test-lab/mock-server.js` | 通过 | 无 |
+| 2026-07-04 | `node --check test-lab/app.js` | 通过 | 无 |
+| 2026-07-04 | `node playwright-runner/src/index.js --case-id 280 --api-base http://127.0.0.1:4175/api --headed false --trace retain-on-failure --video retain-on-failure` | 按预期失败，保留失败 artifact | `playwright-runner-artifacts/runs/280-20260704-172347/` |
+| 2026-07-04 | `POST /api/runner/jobs` case 279 | 异步 job 通过，结果回写执行历史 | `playwright-runner-artifacts/runs/279-20260704-172315/` |
+
+### 遗留问题
+
+- 当前 Runner job 只在 `test-lab/mock-server.js` 内存中维护，服务重启后 job 状态不保留。
+- 当前中台 artifact 链接为本地静态路径，真实环境仍需要对象存储或后端 artifact URL。
+- 真实中台的执行模式选择、权限控制、任务取消、任务队列仍未接入。
+- 成功用例在 `retain-on-failure` 下只保留 report 和 console log，不保留 trace/video；如需成功也保留，使用 `--trace on --video on`。
+
+### 阶段结论
+
+结论：`部分通过`。
+
+M3 的本地报告、artifact 管理、mock 中台 Runner 回放和异步 job 状态已完成；真实中台集成仍待后续接入。
+
+## M4：CI 和批量执行
+
+### 计划目标
+
+- 新增批量运行入口，支持一次运行多个 case。
+- 支持串行和有限并发 worker。
+- 支持 CLI/env 配置，并保持优先级：CLI 参数 > 环境变量 > 默认值。
+- 每个 case 独立生成 artifact，批量结束后生成总览 `summary.json` 和 `report.html`。
+- 批量退出码：全部通过为 `0`，任意失败为非 `0`。
+- mock lab 支持保留 278、279、280 测试用例和历史结果。
+- 增加 GitHub Actions workflow 模板。
+- README 和阶段完成文档补充 M4 验证说明。
+
+### 完成情况
+
+| 计划交付 | 实际完成情况 | 状态 | 说明 |
+| --- | --- | --- | --- |
+| 批量运行入口 | 已新增 `playwright-runner/src/batch.js` 和 `npm run run:batch` | 通过 | 支持 `--case-ids` |
+| 并发 worker | 已支持 `--workers`，默认 `1` | 通过 | case 级有限并发已验证 |
+| 独立 case artifact | 批量内每个 case 复用单 case Runner 流程 | 通过 | 产物位于 `runs/<caseId>-<timestamp>/` |
+| 批量汇总报告 | 已实现 `summary.json` 和 `report.html` | 通过 | 产物位于 `batches/<batchId>/` |
+| 环境变量配置 | 已支持 `CUECAST_CASE_IDS`、`RUNNER_WORKERS`、`RUNNER_TRACE`、`RUNNER_VIDEO`、`RUNNER_ARTIFACT_DIR` 等 | 通过 | 已验证 env 入口，CLI 参数优先由解析逻辑保证 |
+| Mock 批量 job API | 已新增 `POST/GET /api/runner/batches` | 通过 | 已模拟中台批量触发 |
+| CI 模板 | 已新增 `.github/workflows/cuecast-runner.yml` | 通过 | 默认跑 mock case `278,279`，本地检查命令路径 |
+| README | 已补充 M4 批量执行和 CI 验证说明 | 通过 | `playwright-runner/README.md` |
+
+### 已执行验证
+
+| 时间 | 命令 | 结果 | 产物 |
+| --- | --- | --- | --- |
+| 2026-07-04 | `npm --prefix playwright-runner run check` | 通过 | 无 |
+| 2026-07-04 | `node --check test-lab/mock-server.js` | 通过 | 无 |
+| 2026-07-04 | `node --check test-lab/app.js` | 通过 | 无 |
+| 2026-07-04 | `node playwright-runner/src/batch.js --case-ids 278,279 --api-base http://127.0.0.1:4176/api --workers 1` | 通过，退出码 `0`，两个 case passed | `playwright-runner-artifacts/batches/batch-20260704-175748/` |
+| 2026-07-04 | `node playwright-runner/src/batch.js --case-ids 278,280 --api-base http://127.0.0.1:4176/api --workers 1` | 按预期失败，退出码非 `0`，case 280 failed | `playwright-runner-artifacts/batches/batch-20260704-175801/` |
+| 2026-07-04 | `node playwright-runner/src/batch.js --case-ids 278,279 --api-base http://127.0.0.1:4176/api --workers 2` | 通过，两个 case 独立产物，summary 正确 | `playwright-runner-artifacts/batches/batch-20260704-175822/` |
+| 2026-07-04 | `CUECAST_CASE_IDS=278,279 RUNNER_WORKERS=2 CUECAST_API_BASE=http://127.0.0.1:4176/api node playwright-runner/src/batch.js` | 通过，env 入口生效，summary 显示 `workers: 2` | `playwright-runner-artifacts/batches/batch-20260704-175907/` |
+| 2026-07-04 | `POST /api/runner/batches` | 通过，batch job 状态为 `passed`，退出码 `0` | `playwright-runner-artifacts/batches/batch-20260704-175835/` |
+
+### 遗留问题
+
+- M4 当前以 mock lab 和本地 artifact 验收为主，未接真实生产后端。
+- CI workflow 模板尚未在远端 GitHub Actions 实际运行，本轮只做本地命令路径和 mock 验收。
+- 真实环境 secrets、对象存储上传、生产定时任务仍待后续真实集成。
+- `280` 是预期失败用例，仅用于失败报告验证，不纳入默认成功回归集合。
+
+### 阶段结论
+
+结论：`通过`。
+
+M4 本轮要求的批量执行、有限并发、环境变量配置、批量汇总报告、mock 批量 job API 和 GitHub Actions 模板已完成，并通过本地 mock 验收。真实 CI 运行、真实后端 secrets 和对象存储上传仍作为后续真实集成项。
+
+## M5：高级能力
+
+### 候选能力
+
+- 树组件语义定位。
+- Monaco 编辑器输入。
+- iframe / 多窗口。
+- 文件上传 / 下载断言。
+- 网络 mock / API 断言。
+- 导出 Playwright 脚本。
+- 导出 pytest 测试套件。
+
+### M5-A 本轮分批目标
+
+M5 是持续迭代阶段，本轮先实现可本地验证、可保留 mock 用例的第一批高级能力：
+
+- `iframe` 定位上下文：读取 `locator_meta.context.frame.selector`，在 iframe 内执行候选定位。
+- 文件上传：新增 `file_upload` action，对 `input[type=file]` 执行 `setInputFiles`。
+- 下载断言：新增 `assert_download` action，点击触发下载，校验文件名和内容，并保存到 run 产物目录。
+- JSON/API 断言：新增 `assert_json` action，支持页面 JSON 文本子集断言和 API JSON 子集断言。
+- test-lab 新增 case `281`，覆盖上述能力。
+
+### M5-B 本轮分批目标
+
+- Monaco/类 Monaco 编辑器输入：识别 `.monaco-editor` 或 `data-control-kind="monaco"`，清空后插入文本。
+- 树组件语义定位：新增 `tree_item_text` 候选类型，在树容器内按节点文本定位。
+- 多窗口/新标签页基础切换：新增 `click_open_page`，点击后等待 popup，并将后续步骤切换到新页面执行。
+- test-lab 新增 case `282`，覆盖上述能力。
+
+### M5-C 本轮分批目标
+
+- 网络 mock：新增 `network_mock` action，通过 Playwright route mock 指定 URL/pattern。
+- API JSON 断言增强：`assert_json` API 模式支持 `method`、`headers`、`body/json`。
+- Playwright 脚本导出：新增 `playwright-runner/src/export-playwright.js` 和 npm script `export:playwright`。
+- test-lab 新增 case `283`，覆盖网络 mock 和 POST API JSON 断言。
+
+### M5-D 本轮分批目标
+
+- pytest 脚本导出：新增 `playwright-runner/src/export-pytest.js` 和 npm script `export:pytest`。
+- 生成 pytest + Playwright sync API 风格脚本。
+- 对导出文件执行 Python 语法编译检查。
+
+### M5-E 本轮分批目标
+
+- 增强 Playwright/pytest 导出的 locator 渲染。
+- 支持 `frame`、`tree_item_text`、`table_cell_css`、`table_cell_xpath`、`text_exact`、`text_exact_tag`、CSS、XPath candidate。
+- 验证复杂 mock case `279`、`281`、`282` 的 Playwright 和 pytest 导出语法。
+
+### M5-F 本轮分批目标
+
+- 新增 `assert_request` action。
+- 支持校验请求 URL/pattern、method、body 片段和 headers。
+- test-lab 新增 case `284`，覆盖点击按钮触发 POST 请求并断言请求。
+- 修复长页面下 M2 自定义 select 下拉浮层可能开在视口外导致点击超时的问题。
+
+### M5-G 本轮分批目标
+
+- `network_mock` 支持 `delayMs` 延迟响应和 `abort` 失败注入参数。
+- 新增 `assert_request_count` action。
+- Runner 记录页面生命周期内的请求事件，支持按 URL/pattern、method、body 片段、headers 统计请求数量。
+- test-lab 新增 case `285`，覆盖延迟 mock 和两次 POST 请求数量断言。
+
+### M5-H 本轮分批目标
+
+- 新增 `assert_response` action。
+- 支持等待匹配 URL/pattern、method、status 的响应。
+- 支持响应 body 文本片段断言和 JSON 子集断言。
+- `network_mock` 的 abort 场景增加专项 mock case 验证，并在结果中记录 `network_mock_abort`。
+- test-lab 新增 case `286`，覆盖响应 JSON 断言和失败注入后的页面处理分支。
+
+### M5-I 本轮分批目标
+
+- `assert_response` 支持 `snapshot` 和 `snapshotName` 配置。
+- 命中响应后可保存响应 body 到 `responses/<snapshotName>.json|txt`。
+- 同步保存响应 metadata 到 `responses/<snapshotName>.meta.json`。
+- 成功 step 记录 `response_snapshot`、`response_snapshot_meta` 和 `response_body_bytes`。
+- test-lab 新增 case `287`，覆盖响应快照文件化和页面渲染断言。
+
+### M5-J 本轮分批目标
+
+- `assert_response` 支持 `baselinePath` 和 `baselineMode` 配置。
+- 支持 JSON 精确对比、JSON 子集对比和文本对比。
+- 成功 step 记录 `response_baseline`、`response_baseline_mode` 和 `response_baseline_matched`。
+- test-lab 新增响应基线文件 `test-lab/response-baselines/m5j-profile.json`。
+- test-lab 新增 case `288`，覆盖响应基线对比、响应快照和页面渲染断言。
+
+### M5-K 本轮分批目标
+
+- 新增 `network_replay` action。
+- 支持从 `test-lab/network-fixtures/*.json` 读取多条网络响应 fixture。
+- 每条回放 entry 支持 URL/pattern、method、status、headers、json/body、delayMs 和 abort。
+- 成功 step 记录 `network_replay_path` 和 `network_replay_entries`。
+- test-lab 新增 case `289`，覆盖两条接口回放、页面渲染断言和请求数量断言。
+
+### M5-L 本轮分批目标
+
+- 复用已实现的 `file_upload`，覆盖一次上传多个 fixture 文件。
+- 增强 `assert_download` 验收记录，覆盖下载文件名、内容片段、MIME、最小大小和 SHA256 校验。
+- 成功 step 记录 `uploaded_files`、`downloaded_mime`、`downloaded_bytes` 和 `downloaded_sha256`。
+- test-lab 新增 case `290`，覆盖多文件上传和高级下载断言。
+
+### M5-M 本轮分批目标
+
+- 增强 Playwright/pytest 导出，覆盖 `assert_download`、`assert_json`、`assert_request`、`assert_response`、`assert_request_count`、`network_mock` 和 `network_replay`。
+- 导出的 Playwright spec 内置请求/响应匹配、JSON 子集断言、网络 mock/replay、下载校验、响应快照和响应基线 helper。
+- 导出的 pytest 文件内置对应同步 API helper，并能生成 Python 语法有效的高级动作脚本。
+- `network_replay` 导出时展开 fixture entries，避免导出脚本只保留无法执行的 TODO。
+- 使用 mock case `281`、`283` 至 `290` 覆盖高级动作导出语法验收。
+
+### M5-N 本轮分批目标
+
+- 新增 `switch_page` action，支持按 `target: main/current/latest/popup`、`index`、URL 片段和标题片段在已打开页面间显式切换。
+- 新增 `close_page` action，支持关闭当前或匹配页面，并按 fallback 切回主页面或其他仍打开页面。
+- Runner step 结果记录 `switched_page_url`、`switched_page_title`、`closed_page_url`、`active_page_url` 等多窗口调试字段。
+- Playwright/pytest 导出同步支持 `switch_page` 和 `close_page`，导出脚本维护页面列表并生成对应 helper。
+- test-lab 新增 case `291`，覆盖打开 popup、回主页面、按 URL 切回 popup、关闭 popup 后回主页面。
+
+### M5-O 本轮分批目标
+
+- 多窗口专项：新增 case `292`，覆盖连续打开两个 popup，并按标题、URL 精确切换和关闭后 fallback。
+- 树组件专项：新增 case `293`，覆盖展开树节点后按 `tree_item_text` 命中带 checkbox 的树节点。
+- Monaco 专项：新增 case `294`，覆盖多行输入后触发 `Control+S` 快捷键反馈。
+- 上传下载专项：`file_upload` 支持 `value.inputSelector`，覆盖按钮代理隐藏 `input[type=file]`；新增二进制下载 MIME、大小和 SHA256 校验 case `295`。
+- 导出脚本专项：修正 Playwright 导出 import 为当前依赖可执行的 `playwright/test`；新增 case `296`，覆盖 Runner 单跑、Playwright 导出端到端执行、pytest 导出编译、`--storage-state` 和 `CUECAST_START_URL`/`CUECAST_API_BASE` 环境参数化。
+
+### 完成情况
+
+| 能力 | 实际完成情况 | 状态 | 说明 |
+| --- | --- | --- | --- |
+| 树组件语义定位 | 基础文本语义定位、展开后复选树节点选择已完成 | 部分通过 | case 282 覆盖 `tree_item_text`；case 293 覆盖展开树和 checkbox tree item |
+| Monaco 编辑器输入 | 类 Monaco 基础输入、多行输入和快捷键反馈已完成 | 部分通过 | case 282 覆盖 `.monaco-editor` 输入；case 294 覆盖多行输入和 `Control+S` |
+| iframe / 多窗口 | iframe 基础定位、popup 基础切换、显式切换、关闭页面和多 popup 选择已完成 | 部分通过 | case 281 覆盖 iframe；case 282 覆盖 `click_open_page`；case 291 覆盖 `switch_page` 和 `close_page`；case 292 覆盖双 popup 按标题/URL 切换与 fallback |
+| 文件上传 / 下载断言 | 基础上传、下载断言、多文件上传、高级下载校验、隐藏上传代理和二进制下载校验已完成 | 部分通过 | case 281 覆盖基础 `file_upload` 和 `assert_download`；case 290 覆盖多文件上传、MIME、大小和 SHA256 校验；case 295 覆盖 `inputSelector` 代理上传和 `.bin` 下载 |
+| 网络 mock / API 断言 | 基础网络 mock、类 HAR 回放、API JSON 子集断言、请求断言、响应断言、响应快照、快照基线对比、请求数量断言和 abort 失败注入专项 case 已完成 | 部分通过 | case 281 覆盖 GET；case 283 覆盖 `network_mock` 和 POST；case 284 覆盖 `assert_request`；case 285 覆盖 `assert_request_count`；case 286 覆盖 `assert_response` 和 `network_mock.abort`；case 287 覆盖响应快照；case 288 覆盖基线对比；case 289 覆盖 `network_replay` |
+| 导出 Playwright 脚本 | 基础动作、复杂定位、高级动作、多窗口增强动作导出、storage state、环境参数化和导出脚本端到端执行已完成 | 部分通过 | case 279/281/282 覆盖复杂定位；case 281、283-290 覆盖高级动作导出；case 291 覆盖多窗口增强动作导出；case 296 覆盖导出 spec 端到端执行和 storage state |
+| 导出 pytest 测试套件 | 基础动作、复杂定位、高级动作、多窗口增强动作导出、storage state 和环境参数化已完成，专项 smoke 可编译 | 部分通过 | case 279/281/282 覆盖复杂定位；case 281、283-290 覆盖高级动作导出；case 291 覆盖多窗口增强动作导出；case 296 覆盖 pytest 导出编译和 storage state 参数生成 |
+
+### 已执行验证
+
+| 时间 | 命令 | 结果 | 产物 |
+| --- | --- | --- | --- |
+| 2026-07-06 | `npm --prefix playwright-runner run check` | 通过 | 无 |
+| 2026-07-06 | `node --check test-lab/mock-server.js` | 通过 | 无 |
+| 2026-07-06 | `node playwright-runner/src/index.js --case-id 281 --api-base http://127.0.0.1:4177/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖 iframe、文件上传、下载断言、页面 JSON 和 API JSON 断言 | `playwright-runner-artifacts/runs/281-20260706-095906/` |
+| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281 --api-base http://127.0.0.1:4177/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M1/M2/M5-A 批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-095957/` |
+| 2026-07-06 | `node playwright-runner/src/index.js --case-id 282 --api-base http://127.0.0.1:4178/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖 Monaco 输入、树语义定位、多窗口基础切换 | `playwright-runner-artifacts/runs/282-20260706-105759/` |
+| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282 --api-base http://127.0.0.1:4178/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M1/M2/M5-A/M5-B 批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-105946/` |
+| 2026-07-06 | `node playwright-runner/src/index.js --case-id 283 --api-base http://127.0.0.1:4179/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖网络 mock 和 POST API JSON 断言 | `playwright-runner-artifacts/runs/283-20260706-111200/` |
+| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283 --api-base http://127.0.0.1:4179/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M1/M2/M5-A/M5-B/M5-C 批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-111310/` |
+| 2026-07-06 | `node playwright-runner/src/export-playwright.js --case-id 278 --api-base http://127.0.0.1:4179/api --output playwright-runner-artifacts\exports\case-278-m5c.spec.js` | 通过，生成 Playwright spec | `playwright-runner-artifacts/exports/case-278-m5c.spec.js` |
+| 2026-07-06 | `node --check playwright-runner-artifacts\exports\case-278-m5c.spec.js` | 通过 | `playwright-runner-artifacts/exports/case-278-m5c.spec.js` |
+| 2026-07-06 | `node playwright-runner/src/export-pytest.js --case-id 278 --api-base http://127.0.0.1:4180/api --output playwright-runner-artifacts\exports\test_case_278_m5d.py` | 通过，生成 pytest 脚本 | `playwright-runner-artifacts/exports/test_case_278_m5d.py` |
+| 2026-07-06 | `python -m py_compile playwright-runner-artifacts\exports\test_case_278_m5d.py` | 通过 | `playwright-runner-artifacts/exports/test_case_278_m5d.py` |
+| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283 --api-base http://127.0.0.1:4180/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M5-D 后批量回归仍全部 passed | `playwright-runner-artifacts/batches/batch-20260706-112435/` |
+| 2026-07-06 | `node playwright-runner/src/export-playwright.js --case-id 279 --api-base http://127.0.0.1:4181/api --output playwright-runner-artifacts\exports\case-279-m5e.spec.js` | 通过，表格/浮层用例导出 | `playwright-runner-artifacts/exports/case-279-m5e.spec.js` |
+| 2026-07-06 | `node playwright-runner/src/export-playwright.js --case-id 281 --api-base http://127.0.0.1:4181/api --output playwright-runner-artifacts\exports\case-281-m5e.spec.js` | 通过，iframe 用例导出 | `playwright-runner-artifacts/exports/case-281-m5e.spec.js` |
+| 2026-07-06 | `node playwright-runner/src/export-playwright.js --case-id 282 --api-base http://127.0.0.1:4181/api --output playwright-runner-artifacts\exports\case-282-m5e.spec.js` | 通过，树/多窗口用例导出 | `playwright-runner-artifacts/exports/case-282-m5e.spec.js` |
+| 2026-07-06 | `node --check playwright-runner-artifacts\exports\case-279-m5e.spec.js` / `case-281-m5e.spec.js` / `case-282-m5e.spec.js` | 通过 | 对应 Playwright 导出文件 |
+| 2026-07-06 | `node playwright-runner/src/export-pytest.js --case-id 279/281/282 --api-base http://127.0.0.1:4181/api --output ...` | 通过，复杂定位 pytest 文件生成 | `playwright-runner-artifacts/exports/test_case_279_m5e.py` 等 |
+| 2026-07-06 | `python -m py_compile playwright-runner-artifacts\exports\test_case_279_m5e.py` / `test_case_281_m5e.py` / `test_case_282_m5e.py` | 通过 | 对应 pytest 导出文件 |
+| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283 --api-base http://127.0.0.1:4181/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M5-E 后批量回归仍全部 passed | `playwright-runner-artifacts/batches/batch-20260706-113640/` |
+| 2026-07-06 | `node playwright-runner/src/index.js --case-id 284 --api-base http://127.0.0.1:4182/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖请求 URL、method、body 断言 | `playwright-runner-artifacts/runs/284-20260706-115223/` |
+| 2026-07-06 | `node playwright-runner/src/index.js --case-id 279 --api-base http://127.0.0.1:4182/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，验证自定义 select 长页面回归修复 | `playwright-runner-artifacts/runs/279-20260706-115614/` |
+| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283,284 --api-base http://127.0.0.1:4182/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M5-F 后批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-115636/` |
+| 2026-07-06 | `node playwright-runner/src/index.js --case-id 285 --api-base http://127.0.0.1:4183/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖延迟 mock 和请求数量断言 | `playwright-runner-artifacts/runs/285-20260706-150446/` |
+| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283,284,285 --api-base http://127.0.0.1:4183/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M5-G 后批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-150618/` |
+| 2026-07-06 | `node playwright-runner/src/index.js --case-id 286 --api-base http://127.0.0.1:4184/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖响应 JSON 断言和 abort 失败注入专项验证 | `playwright-runner-artifacts/runs/286-20260706-151419/` |
+| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283,284,285,286 --api-base http://127.0.0.1:4184/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M5-H 后批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-151442/` |
+| 2026-07-06 | `node playwright-runner/src/index.js --case-id 287 --api-base http://127.0.0.1:4185/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖响应快照文件化和页面渲染断言 | `playwright-runner-artifacts/runs/287-20260706-153416/` |
+| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283,284,285,286,287 --api-base http://127.0.0.1:4185/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M5-I 后批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-153501/` |
+| 2026-07-06 | `node playwright-runner/src/index.js --case-id 288 --api-base http://127.0.0.1:4186/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖响应基线对比、快照和页面渲染断言 | `playwright-runner-artifacts/runs/288-20260706-155300/` |
+| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283,284,285,286,287,288 --api-base http://127.0.0.1:4186/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M5-J 后批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-155505/` |
+| 2026-07-06 | `node playwright-runner/src/index.js --case-id 289 --api-base http://127.0.0.1:4187/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖类 HAR 回放、页面渲染断言和请求数量断言 | `playwright-runner-artifacts/runs/289-20260706-161227/` |
+| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283,284,285,286,287,288,289 --api-base http://127.0.0.1:4187/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M5-K 后批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-161316/` |
+| 2026-07-06 | `node playwright-runner/src/index.js --case-id 290 --api-base http://127.0.0.1:4192/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖多文件上传、下载 MIME、大小、内容和 SHA256 校验 | `playwright-runner-artifacts/runs/290-20260706-175200/` |
+| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283,284,285,286,287,288,289,290 --api-base http://127.0.0.1:4194/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M5-L 后批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-175358/` |
+| 2026-07-06 | `npm --prefix playwright-runner run check` | 通过，M5-M 导出器源码语法检查通过 | 无 |
+| 2026-07-06 | `node playwright-runner/src/export-playwright.js --case-id 281/283/284/285/286/287/288/289/290 --api-base http://127.0.0.1:4197/api --output <temp>\case-*-m5m.spec.js` + `node --check <temp>\case-*-m5m.spec.js` | 通过，高级动作 Playwright spec 均可生成并通过语法检查 | `%TEMP%\cuecast-export-m5m-2\` |
+| 2026-07-06 | `node playwright-runner/src/export-pytest.js --case-id 281/283/284/285/286/287/288/289/290 --api-base http://127.0.0.1:4197/api --output <temp>\test_case_*_m5m.py` + `python -m py_compile <temp>\test_case_*_m5m.py` | 通过，高级动作 pytest 文件均可生成并通过 Python 编译检查 | `%TEMP%\cuecast-export-m5m-2\` |
+| 2026-07-06 | `npm --prefix playwright-runner run check` | 通过，M5-N Runner 和导出器源码语法检查通过 | 无 |
+| 2026-07-06 | `node --check test-lab/mock-server.js` | 通过，case 291 seed 语法检查通过 | 无 |
+| 2026-07-06 | `node playwright-runner/src/index.js --case-id 291 --api-base http://127.0.0.1:4195/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖打开 popup、显式切回主页面、按 URL 切回 popup、关闭 popup 并回主页面 | `playwright-runner-artifacts/runs/291-20260706-184309/` |
+| 2026-07-06 | `node playwright-runner/src/export-playwright.js --case-id 291 --api-base http://127.0.0.1:4196/api --output <temp>\case-291-m5n.spec.js` + `node --check <temp>\case-291-m5n.spec.js` | 通过，多窗口增强 Playwright spec 可生成并通过语法检查 | `%TEMP%\cuecast-export-m5n\case-291-m5n.spec.js` |
+| 2026-07-06 | `node playwright-runner/src/export-pytest.js --case-id 291 --api-base http://127.0.0.1:4196/api --output <temp>\test_case_291_m5n.py` + `python -m py_compile <temp>\test_case_291_m5n.py` | 通过，多窗口增强 pytest 文件可生成并通过 Python 编译检查 | `%TEMP%\cuecast-export-m5n\test_case_291_m5n.py` |
+| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283,284,285,286,287,288,289,290,291 --api-base http://127.0.0.1:4197/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M5-N 后批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-184430/` |
+| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283,284,285,286,287,288,289,290,291 --api-base http://127.0.0.1:4198/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，收口复验 13 个 mock case 全部 passed | `playwright-runner-artifacts/batches/batch-20260706-203704/` |
+| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 292,293,294,295,296 --api-base http://127.0.0.1:4199/api --workers 1 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M5-O 五类专项新增 case 全部 passed | `playwright-runner-artifacts/batches/batch-20260706-212433/` |
+| 2026-07-06 | `node playwright-runner/src/index.js --case-id 296 --api-base http://127.0.0.1:4205/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，导出 smoke case 的 Runner 单跑通过 | `playwright-runner-artifacts/runs/296-20260706-213816/` |
+| 2026-07-06 | `node playwright-runner/src/export-playwright.js --case-id 296 --api-base http://127.0.0.1:4205/api --output playwright-runner/tests/case-296-m5o-e2e.spec.js` + `node --check ...` + `npm --prefix playwright-runner exec playwright test case-296-m5o-e2e.spec.js --config playwright.config.js` | 通过，导出 Playwright spec 在标准 Playwright Test 项目内端到端执行 passed | `playwright-runner/tests/case-296-m5o-e2e.spec.js` |
+| 2026-07-06 | `node playwright-runner/src/export-pytest.js --case-id 296 --api-base http://127.0.0.1:4206/api --output playwright-runner-artifacts/exports/test_case_296_m5o_e2e.py` + `python -m py_compile ...` | 通过，pytest 导出 smoke 文件可编译 | `playwright-runner-artifacts/exports/test_case_296_m5o_e2e.py` |
+| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296 --api-base http://127.0.0.1:4206/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M5-O 后 18 个 mock 成功集合全部 passed | `playwright-runner-artifacts/batches/batch-20260706-214030/` |
+| 2026-07-06 | `node playwright-runner/src/export-playwright.js --case-id 296 --api-base http://127.0.0.1:4207/api --storage-state test-lab/storage-states/m5o-storage-state.json --output playwright-runner/tests/case-296-m5o-storage.spec.js` + `node --check ...` + `npm --prefix playwright-runner exec playwright test case-296-m5o-storage.spec.js --config playwright.config.js` | 通过，Playwright 导出支持 storage state 并端到端执行 passed；导出文件包含 `CUECAST_START_URL`、`CUECAST_API_BASE`、`CUECAST_STORAGE_STATE` 参数入口 | `playwright-runner/tests/case-296-m5o-storage.spec.js` |
+| 2026-07-06 | `node playwright-runner/src/export-pytest.js --case-id 296 --api-base http://127.0.0.1:4207/api --storage-state test-lab/storage-states/m5o-storage-state.json --output playwright-runner-artifacts/exports/test_case_296_m5o_storage.py` + `python -m py_compile ...` | 通过，pytest 导出支持 browser context storage state 和环境参数化并可编译 | `playwright-runner-artifacts/exports/test_case_296_m5o_storage.py` |
+
+### 验收记录
+
+| 验收项 | 结果 | 说明 |
+| --- | --- | --- |
+| iframe 内定位可执行 | 通过 | case 281 step 1/2 的 `locator_source` 为 `frame:locator_meta.candidates[0]` |
+| 文件上传可执行 | 通过 | case 281 step 3 记录 `uploaded_files` |
+| 下载断言可执行 | 通过 | case 281 step 5 记录 `downloaded_file` 和 `downloaded_filename` |
+| 多文件上传可执行 | 通过 | case 290 step 1 记录两个 `uploaded_files` |
+| 高级下载校验可执行 | 通过 | case 290 step 3 记录 `downloaded_filename: "m5-advanced.txt"`、`downloaded_mime: "text/plain"`、`downloaded_bytes: 104` 和匹配的 `downloaded_sha256` |
+| 页面 JSON 子集断言可执行 | 通过 | case 281 step 6 断言 `json-payload` |
+| API JSON 子集断言可执行 | 通过 | case 281 step 7 的 `locator_source` 为 `api:assert_json` |
+| Monaco/类 Monaco 输入可执行 | 通过 | case 282 step 1 输入后，step 2 断言编辑器状态 |
+| 树组件文本语义定位可执行 | 通过 | case 282 step 3 的 `locator_source` 为 `tree:locator_meta.candidates[0]` |
+| 多窗口基础切换可执行 | 通过 | case 282 step 5 记录 `opened_page_url`，后续步骤在 popup 内执行 |
+| 多窗口显式切换可执行 | 通过 | case 291 step 3 切回 `target.html`，step 5 按 URL 切回 `popup.html`，均记录 `switched_page_url` 和 `switched_page_title` |
+| 多窗口关闭并回退可执行 | 通过 | case 291 step 8 记录 `closed_page_url: popup.html`，并记录 `active_page_url: target.html` |
+| 多 popup 选择和 fallback 可执行 | 通过 | case 292 覆盖 Alpha/Beta 两个 popup，按标题和 URL 切换，关闭 Beta 后 fallback 到 Alpha，再关闭回主页面 |
+| 展开/复选树节点可执行 | 通过 | case 293 覆盖展开树节点后通过 `tree_item_text` 点击 `Ops Alerts` checkbox tree item |
+| Monaco 多行输入和快捷键可执行 | 通过 | case 294 覆盖多行编辑内容和 `Control+S` 保存反馈 |
+| 隐藏上传代理可执行 | 通过 | case 295 step 1 使用 `value.inputSelector` 指向隐藏 `input[type=file]`，结果记录 `upload_via_proxy: true` |
+| 二进制下载校验可执行 | 通过 | case 295 step 3 覆盖 `.bin` 文件 MIME、大小和 SHA256 校验 |
+| 网络 mock 可执行 | 通过 | case 283 step 1 记录 `network_mock_url` 和 `network_mock_status` |
+| 类 HAR 回放可执行 | 通过 | case 289 step 1 记录 `network_replay_entries: 2`，step 4 记录 `request_count: 2` |
+| POST API JSON 子集断言可执行 | 通过 | case 283 step 4 的 `locator_source` 为 `api:assert_json` |
+| 请求断言可执行 | 通过 | case 284 step 1 记录 `request_url` 和 `request_method` |
+| 请求数量断言可执行 | 通过 | case 285 step 6 记录 `request_count: 2` |
+| 响应断言可执行 | 通过 | case 286 step 1 记录 `response_url` 和 `response_status: 200` |
+| 失败注入专项 case 可执行 | 通过 | case 286 step 3 记录 `network_mock_abort: "failed"`，后续页面状态断言为 `Abort handled` |
+| 响应快照文件化可执行 | 通过 | case 287 step 1 记录 `response_snapshot`、`response_snapshot_meta` 和 `response_body_bytes` |
+| 响应基线对比可执行 | 通过 | case 288 step 1 记录 `response_baseline`、`response_baseline_mode: "exact"` 和 `response_baseline_matched: true` |
+| Playwright 脚本导出可执行 | 通过 | case 278 导出 spec 并通过 `node --check` |
+| pytest 脚本导出可执行 | 通过 | case 278 导出 `.py` 并通过 `python -m py_compile` |
+| 复杂定位导出可执行 | 通过 | case 279/281/282 覆盖 table、frame、tree、text candidate 导出 |
+| 高级动作 Playwright 导出可生成 | 通过 | case 281、283、284、285、286、287、288、289、290 覆盖下载、JSON、请求/响应、网络 mock/replay 和请求数量断言导出 |
+| 高级动作 pytest 导出可生成 | 通过 | case 281、283、284、285、286、287、288、289、290 覆盖同一批高级动作并通过 `py_compile` |
+| 多窗口增强 Playwright 导出可生成 | 通过 | case 291 覆盖 `switch_page` 和 `close_page` 导出并通过 `node --check` |
+| 多窗口增强 pytest 导出可生成 | 通过 | case 291 覆盖 `switch_page` 和 `close_page` 导出并通过 `python -m py_compile` |
+| 导出 Playwright spec 端到端可执行 | 通过 | case 296 导出到 `playwright-runner/tests/case-296-m5o-e2e.spec.js` 后通过 `npm --prefix playwright-runner exec playwright test` |
+| 专项 pytest 导出可编译 | 通过 | case 296 导出 pytest 文件后通过 `python -m py_compile` |
+| Playwright 导出 storage state 可执行 | 通过 | case 296 使用 `--storage-state test-lab/storage-states/m5o-storage-state.json` 导出后端到端 passed |
+| Playwright/pytest 导出环境参数化可生成 | 通过 | 导出文件包含 `CUECAST_START_URL`、`CUECAST_API_BASE` 和 `CUECAST_STORAGE_STATE` 参数入口 |
+| 前序通过集合未回归 | 通过 | 批量执行 `278,279,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296` 全部 passed |
+
+### M5 遗留问题
+
+- 多窗口/新标签页已覆盖点击打开 popup、按主页面/latest/index/URL/title 显式切换、关闭页面并 fallback、双 popup 标题/URL 选择；跨 browser context、更多 popup 并发策略和真实业务多窗口流程仍待补强。
+- Monaco 编辑器当前覆盖类 Monaco 基础输入、多行输入和快捷键反馈；真实 Monaco 的复杂 IME、格式化、真实快捷键副作用和多光标场景尚未验证。
+- 树组件语义定位当前覆盖基础文本节点、展开后 checkbox 节点；懒加载、虚拟树、复杂父子路径和批量展开/折叠语义仍待补强。
+- 网络 mock 当前覆盖基础 route fulfill、类 HAR 回放、响应延迟、abort 失败注入专项 case、请求断言、响应断言、响应快照文件化、响应基线对比和请求数量断言；复杂网络时序仍待补强。
+- 文件上传/下载当前覆盖基础场景、多文件上传、隐藏控件代理上传、下载 MIME/大小/SHA256 校验和二进制下载；下载更多元数据、大文件和上传前端代理链路仍待补强。
+- Playwright/pytest 脚本导出已覆盖部分复杂 `locator_meta`、高级动作、多窗口增强动作语法生成、storage state、环境参数化和 Playwright spec 端到端 smoke；更大范围导出脚本等价性仍待补强。
+
+### M5 阶段结论
+
+结论：`部分通过`。
+
+M5-A 至 M5-O 十五批高级能力已完成并通过本地 mock 验收；完整 M5 仍需继续按真实业务和更复杂组件专项推进。
