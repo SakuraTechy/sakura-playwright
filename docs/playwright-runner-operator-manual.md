@@ -20,9 +20,27 @@
 - 真实中台权限、任务队列、对象存储上传。
 - 生产 GitHub Actions 实际运行结果。
 
+## admin 产品环境回放（2026-07-15）
+
+admin 场景页的“扩展 CDP 回放”和“Playwright Runner 回放”共用新的单用例弹窗。弹窗要求先选择产品环境，并实时检查环境启用状态、执行节点在线状态和有效前端地址；任一条件不满足时不能开始回放。平台执行（Jenkins）的弹窗、请求 DTO 和执行链路未修改。
+
+后端按以下顺序解析产品环境的目标 Origin：
+
+1. 产品环境 `lastDomain`。
+2. 服务器配置中的“前端域名”与“前端端口”。
+3. 服务器 IP 与“前端端口”。
+
+执行快照会将 `start_url/startUrl`、步骤的 `url/start_url/end_url` 和 `navigate.value` 中的绝对 HTTP(S) 地址替换为目标 Origin，同时保留原路径、查询参数和锚点。相对地址、`data:` 等非 HTTP(S) 地址保持不变。该转换只作用于接口响应副本，不会回写 admin 的 `caseList`、`playwright_step` 或 `locator_meta`。
+
+CDP 弹窗可选择最大化、当前窗口或自定义窗口；自定义宽高范围为 `320–10000`。页面错误检测对应 `page_error_check_enabled`，“AI 深度分析”仅为预留说明。弹窗值优先于录制值，布尔值 `false` 和数值 `0` 也会作为有效覆盖值。
+
+Runner 弹窗本次任务使用中文名称展示浏览器、显示浏览器窗口、忽略 HTTPS 证书错误、追踪文件保留策略、录屏保留策略、单步骤超时、用例总超时、操作慢放和执行结束停留。对应传输字段仍为 `browser`、`headed`、`ignoreHttpsErrors`、`trace`、`video`、`stepTimeoutMs`、`caseTimeoutMs`、`slowMoMs`、`finishDelayMs`。默认值依次为 `chromium`、`false`、`true`、`retain-on-failure`、`retain-on-failure`、`6000`、`600000`、`0`、`0`。admin 仅把白名单字段转换为 CLI 参数，CLI 参数优先于 `.env`；`RUNNER_WORKERS`、artifact 目录、token 和 storage state 仍由服务端管理。总用例超时会关闭 context/browser，并按失败结果正常回传。弹窗底部按 Jenkins 模板展示场景信息；当前单场景、单用例回放会使用详情页指定用例，场景入口则使用首个可执行用例。
+
+CDP/Runner 执行链路中的开始时间、结束时间、诊断日志时间和响应快照时间统一为北京时间 `yyyy-MM-dd HH:mm:ss`。admin Runner 任务状态以及写入 `AutomationUiSceneDO.debugRecord` 的顶层和 `playwrightResult` 嵌套执行时间使用同一格式；后端会在入库前递归兼容并转换旧版客户端传入的 UTC ISO 时间。目录仍使用 `yyyyMMdd/HHmmss`。
+
 ## 环境要求
 
-在仓库根目录 `D:\King\sakura-playwright` 执行命令。
+在仓库根目录 `D:\King\sakura\sakura-playwright` 执行命令。
 
 必需环境：
 
@@ -40,16 +58,16 @@
 首次安装：
 
 ```powershell
-npm --prefix playwright-runner install
-npm --prefix playwright-runner exec playwright install chromium
+npm install
+npm exec -- playwright install chromium
 ```
 
 基础检查：
 
 ```powershell
-npm --prefix playwright-runner run check
-node --check test-lab/mock-server.js
-node --check test-lab/app.js
+npm run check
+node --check ../sakura-cuecast/test-lab/mock-server.js
+node --check ../sakura-cuecast/test-lab/app.js
 ```
 
 通过标准：命令正常结束，没有 `SyntaxError`。
@@ -59,7 +77,7 @@ node --check test-lab/app.js
 启动服务：
 
 ```powershell
-node test-lab/mock-server.js --port 4173
+node ../sakura-cuecast/test-lab/mock-server.js --port 4173
 ```
 
 打开页面：
@@ -77,7 +95,7 @@ http://127.0.0.1:4173/testcases/278
 如果 `4173` 端口被占用，可以换一个端口，例如 `4180`，但后续所有命令里的 `--api-base` 也要改成对应端口：
 
 ```powershell
-node test-lab/mock-server.js --port 4180
+node ../sakura-cuecast/test-lab/mock-server.js --port 4180
 ```
 
 ```text
@@ -131,28 +149,28 @@ foreach ($id in $ids.Split(',')) {
 
 | 路径 | 用途 |
 | --- | --- |
-| `test-lab/upload-fixtures/m5-upload.txt` | 基础上传 |
-| `test-lab/upload-fixtures/m5-upload-extra.txt` | 多文件上传 |
-| `test-lab/downloads/m5-sample.txt` | 基础下载 |
-| `test-lab/downloads/m5-advanced.txt` | 高级下载校验 |
-| `test-lab/downloads/m5o-binary.bin` | 二进制下载校验 |
-| `test-lab/network-fixtures/m5k-replay.json` | 类 HAR 网络回放 |
-| `test-lab/response-baselines/m5j-profile.json` | 响应基线对比 |
-| `test-lab/storage-states/m5o-storage-state.json` | 导出脚本 storage state 验证 |
+| `../sakura-cuecast/test-lab/upload-fixtures/m5-upload.txt` | 基础上传 |
+| `../sakura-cuecast/test-lab/upload-fixtures/m5-upload-extra.txt` | 多文件上传 |
+| `../sakura-cuecast/test-lab/downloads/m5-sample.txt` | 基础下载 |
+| `../sakura-cuecast/test-lab/downloads/m5-advanced.txt` | 高级下载校验 |
+| `../sakura-cuecast/test-lab/downloads/m5o-binary.bin` | 二进制下载校验 |
+| `../sakura-cuecast/test-lab/network-fixtures/m5k-replay.json` | 类 HAR 网络回放 |
+| `../sakura-cuecast/test-lab/response-baselines/m5j-profile.json` | 响应基线对比 |
+| `../sakura-cuecast/test-lab/storage-states/m5o-storage-state.json` | 导出脚本 storage state 验证 |
 
 ## 执行单个用例
 
 命令格式：
 
 ```powershell
-node playwright-runner/src/index.js --case-id <caseId> --api-base http://127.0.0.1:4173/api --headed false
+node src/index.js --case-id <caseId> --api-base http://127.0.0.1:4173/api --headed false
 ```
 
 示例：执行基础用例 `278`：
 
 ```powershell
 Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4173/api/testcases/278/reset
-node playwright-runner/src/index.js --case-id 278 --api-base http://127.0.0.1:4173/api --headed false
+node src/index.js --case-id 278 --api-base http://127.0.0.1:4173/api --headed false
 ```
 
 成功输出示例：
@@ -165,21 +183,21 @@ node playwright-runner/src/index.js --case-id 278 --api-base http://127.0.0.1:41
 
 ```powershell
 Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4173/api/testcases/290/reset
-node playwright-runner/src/index.js --case-id 290 --api-base http://127.0.0.1:4173/api --headed false --trace retain-on-failure --video retain-on-failure
+node src/index.js --case-id 290 --api-base http://127.0.0.1:4173/api --headed false --trace retain-on-failure --video retain-on-failure
 ```
 
 执行多 popup 用例 `292`：
 
 ```powershell
 Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4173/api/testcases/292/reset
-node playwright-runner/src/index.js --case-id 292 --api-base http://127.0.0.1:4173/api --headed false
+node src/index.js --case-id 292 --api-base http://127.0.0.1:4173/api --headed false
 ```
 
 执行预期失败用例 `280`：
 
 ```powershell
 Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4173/api/testcases/280/reset
-node playwright-runner/src/index.js --case-id 280 --api-base http://127.0.0.1:4173/api --headed false --trace retain-on-failure --video retain-on-failure
+node src/index.js --case-id 280 --api-base http://127.0.0.1:4173/api --headed false --trace retain-on-failure --video retain-on-failure
 ```
 
 验收点：
@@ -193,7 +211,7 @@ node playwright-runner/src/index.js --case-id 280 --api-base http://127.0.0.1:41
 命令格式：
 
 ```powershell
-node playwright-runner/src/batch.js --case-ids <ids> --api-base http://127.0.0.1:4173/api --workers <workerCount>
+node src/batch.js --case-ids <ids> --api-base http://127.0.0.1:4173/api --workers <workerCount>
 ```
 
 执行完整成功集合：
@@ -203,7 +221,7 @@ $ids = '278,279,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296'
 foreach ($id in $ids.Split(',')) {
   Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:4173/api/testcases/$id/reset" | Out-Null
 }
-node playwright-runner/src/batch.js --case-ids $ids --api-base http://127.0.0.1:4173/api --workers 2
+node src/batch.js --case-ids $ids --api-base http://127.0.0.1:4173/api --workers 2
 ```
 
 通过标准：
@@ -217,7 +235,7 @@ node playwright-runner/src/batch.js --case-ids $ids --api-base http://127.0.0.1:
 ```powershell
 Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4173/api/testcases/278/reset
 Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4173/api/testcases/280/reset
-node playwright-runner/src/batch.js --case-ids 278,280 --api-base http://127.0.0.1:4173/api --workers 1
+node src/batch.js --case-ids 278,280 --api-base http://127.0.0.1:4173/api --workers 1
 ```
 
 通过标准：
@@ -231,8 +249,10 @@ node playwright-runner/src/batch.js --case-ids 278,280 --api-base http://127.0.0
 单用例产物目录：
 
 ```text
-playwright-runner-artifacts/runs/<caseId>-<timestamp>/
+playwright-runner-artifacts/runs/<projectShortName>/<versionName>/<sceneId>/<caseId>/<yyyyMMdd>/<HHmmss>/
 ```
+
+例如：`artifacts/runs/AAS_P/V6.5B06D011/AAS_P_SMOKE_006/SCENE_CASE_001/20260715/180409/`。目录各层来自 admin 用例执行快照，字符会按 Windows 路径规则进行安全处理；`runId` 和 admin API 关联使用业务 `sceneId:caseId`，例如 `AAS_P_SMOKE_006:SCENE_CASE_001`。
 
 批量产物目录：
 
@@ -257,7 +277,7 @@ playwright-runner-artifacts/batches/<batchId>/
 检查单用例结果：
 
 ```powershell
-Get-Content -Raw playwright-runner-artifacts\runs\<caseId>-<timestamp>\result.json
+Get-Content -Raw playwright-runner-artifacts\runs\<projectShortName>\<versionName>\<sceneId>\<caseId>\<yyyyMMdd>\<HHmmss>\result.json
 ```
 
 重点字段：
@@ -280,7 +300,7 @@ Get-Content -Raw playwright-runner-artifacts\runs\<caseId>-<timestamp>\result.js
 打开 HTML 报告：
 
 ```text
-playwright-runner-artifacts/runs/<caseId>-<timestamp>/report.html
+playwright-runner-artifacts/runs/<projectShortName>/<versionName>/<sceneId>/<caseId>/<yyyyMMdd>/<HHmmss>/report.html
 playwright-runner-artifacts/batches/<batchId>/report.html
 ```
 
@@ -360,22 +380,22 @@ Invoke-RestMethod -Method Get -Uri http://127.0.0.1:4173/api/runner/jobs/<jobId>
 导出基础 spec：
 
 ```powershell
-node playwright-runner/src/export-playwright.js --case-id 296 --api-base http://127.0.0.1:4173/api --output playwright-runner/tests/case-296-m5o-e2e.spec.js
-node --check playwright-runner/tests/case-296-m5o-e2e.spec.js
-npm --prefix playwright-runner exec playwright test case-296-m5o-e2e.spec.js --config playwright.config.js
+node src/export-playwright.js --case-id 296 --api-base http://127.0.0.1:4173/api --output tests/case-296-m5o-e2e.spec.js
+node --check tests/case-296-m5o-e2e.spec.js
+npm exec -- playwright test case-296-m5o-e2e.spec.js --config playwright.config.js
 ```
 
 导出带 storage state 的 spec：
 
 ```powershell
-node playwright-runner/src/export-playwright.js `
+node src/export-playwright.js `
   --case-id 296 `
   --api-base http://127.0.0.1:4173/api `
-  --storage-state test-lab/storage-states/m5o-storage-state.json `
-  --output playwright-runner/tests/case-296-m5o-storage.spec.js
+  --storage-state ../sakura-cuecast/test-lab/storage-states/m5o-storage-state.json `
+  --output tests/case-296-m5o-storage.spec.js
 
-node --check playwright-runner/tests/case-296-m5o-storage.spec.js
-npm --prefix playwright-runner exec playwright test case-296-m5o-storage.spec.js --config playwright.config.js
+node --check tests/case-296-m5o-storage.spec.js
+npm exec -- playwright test case-296-m5o-storage.spec.js --config playwright.config.js
 ```
 
 导出文件支持以下环境变量覆盖：
@@ -386,24 +406,24 @@ CUECAST_API_BASE
 CUECAST_STORAGE_STATE
 ```
 
-注意：要用当前 `playwright.config.js` 直接运行导出的 spec，建议输出到 `playwright-runner/tests/`，因为配置中的 `testDir` 指向该目录。
+注意：要用当前 `playwright.config.js` 直接运行导出的 spec，建议输出到 `tests/`，因为配置中的 `testDir` 指向该目录。
 
 ## 导出 Pytest 脚本
 
 导出 pytest 文件：
 
 ```powershell
-node playwright-runner/src/export-pytest.js --case-id 296 --api-base http://127.0.0.1:4173/api --output playwright-runner-artifacts/exports/test_case_296_m5o_e2e.py
+node src/export-pytest.js --case-id 296 --api-base http://127.0.0.1:4173/api --output playwright-runner-artifacts/exports/test_case_296_m5o_e2e.py
 python -m py_compile playwright-runner-artifacts/exports/test_case_296_m5o_e2e.py
 ```
 
 导出带 storage state 的 pytest 文件：
 
 ```powershell
-node playwright-runner/src/export-pytest.js `
+node src/export-pytest.js `
   --case-id 296 `
   --api-base http://127.0.0.1:4173/api `
-  --storage-state test-lab/storage-states/m5o-storage-state.json `
+  --storage-state ../sakura-cuecast/test-lab/storage-states/m5o-storage-state.json `
   --output playwright-runner-artifacts/exports/test_case_296_m5o_storage.py
 
 python -m py_compile playwright-runner-artifacts/exports/test_case_296_m5o_storage.py
@@ -416,27 +436,30 @@ python -m py_compile playwright-runner-artifacts/exports/test_case_296_m5o_stora
 单用例入口：
 
 ```powershell
-node playwright-runner/src/index.js --case-id 278 --api-base http://127.0.0.1:4173/api --headed false
+node src/index.js --case-id 278 --api-base http://127.0.0.1:4173/api --headed false
 ```
 
 | 参数 | 说明 | 默认值 |
 | --- | --- | --- |
 | `--case-id` | 单用例 ID | 必填 |
+| `--project-environment-id` | admin 产品环境 ID；admin 单用例任务必填 | 无 |
 | `--api-base` | API 地址 | `http://127.0.0.1:4173/api` |
 | `--browser` | `chromium`、`firefox`、`webkit` | `chromium` |
 | `--headed` | 是否显示浏览器 | `false` |
+| `--ignore-https-errors` | 是否忽略 HTTPS 证书错误 | `false` |
 | `--slow-mo` | Playwright 动作慢放毫秒数，便于人工观察 | `0` |
 | `--finish-delay` | 执行结束后关闭浏览器前停留毫秒数 | `0` |
 | `--trace` | `on`、`off`、`retain-on-failure` | `off` |
 | `--video` | `on`、`off`、`retain-on-failure` | `off` |
 | `--timeout` | 单步超时毫秒 | `6000` |
+| `--case-timeout` | 总用例超时毫秒；超时会关闭 context/browser 并回传失败 | `600000` |
 | `--start-step` | 从第几个 step 开始 | `0` |
 | `--artifact-dir` | 产物根目录 | `playwright-runner-artifacts` |
 
 批量入口：
 
 ```powershell
-node playwright-runner/src/batch.js --case-ids 278,279 --api-base http://127.0.0.1:4173/api --workers 2
+node src/batch.js --case-ids 278,279 --api-base http://127.0.0.1:4173/api --workers 2
 ```
 
 | 参数 | 说明 | 默认值 |
@@ -452,6 +475,7 @@ node playwright-runner/src/batch.js --case-ids 278,279 --api-base http://127.0.0
 CUECAST_CASE_IDS       批量 case ID，例如 278,279
 CUECAST_API_BASE       后端 API 地址
 CUECAST_TOKEN          后端鉴权 token
+CUECAST_PROJECT_ENVIRONMENT_ID admin 产品环境 ID
 CUECAST_STORAGE_STATE  导出脚本或真实环境使用的 storage state 文件
 RUNNER_WORKERS         批量 worker 数
 RUNNER_BROWSER         chromium | firefox | webkit
@@ -470,7 +494,7 @@ RUNNER_CASE_TIMEOUT_MS 单 case 超时
 当后端和中台准备好后，mock 命令中的 `--api-base` 替换为真实 API 地址：
 
 ```powershell
-node playwright-runner/src/index.js `
+node src/index.js `
   --case-id <真实caseId> `
   --api-base https://<真实后端>/api `
   --token <真实token> `
@@ -486,7 +510,7 @@ $env:CUECAST_API_BASE = 'https://<真实后端>/api'
 $env:CUECAST_TOKEN = '<真实token>'
 $env:CUECAST_CASE_IDS = '1001,1002,1003'
 $env:RUNNER_WORKERS = '2'
-node playwright-runner/src/batch.js
+node src/batch.js
 ```
 
 真实环境需要确认：
@@ -533,7 +557,7 @@ CUECAST_TOKEN
 浏览器未安装：
 
 ```powershell
-npm --prefix playwright-runner exec playwright install chromium
+npm exec -- playwright install chromium
 ```
 
 用例没有回到初始状态：
@@ -544,8 +568,8 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4173/api/testcases/<caseId>
 
 导出 Playwright spec 提示 `No tests found`：
 
-- 将导出文件放到 `playwright-runner/tests/`。
-- 使用 `npm --prefix playwright-runner exec playwright test <fileName> --config playwright.config.js`。
+- 将导出文件放到 `tests/`。
+- 使用 `npm exec -- playwright test <fileName> --config playwright.config.js`。
 
 pytest 编译失败：
 
@@ -588,7 +612,7 @@ pytest 编译失败：
 当前本地 mock 阶段可以告一段落。已完成能力见：
 
 - `docs/playwright-runner-stage-completion.md`
-- `playwright-runner/README.md`
+- `README.md`
 
 仍需真实环境配合的事项：
 

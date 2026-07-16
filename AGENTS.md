@@ -4,37 +4,40 @@
 
 ## 最高优先级规则
 
-- 默认禁止改动 `cuecast/` 目录下的任何文件。
-- 只有当用户在当前对话中明确要求修改 Chrome 扩展本身时，才可以新增、编辑、删除或格式化 `cuecast/` 下的文件。
-- 不得通过批量脚本、格式化工具或自动迁移间接改动 `cuecast/`。
+- Chrome 扩展已拆分到 `../sakura-cuecast/`，本仓库不再包含 `cuecast/` 目录。
+- 只有当用户在当前对话中明确要求修改 Chrome 扩展本身时，才可以进入 `../sakura-cuecast/` 修改扩展文件。
+- 不得通过批量脚本、格式化工具或自动迁移间接改动 `../sakura-cuecast/`。
 - 项目文档默认使用中文书写。
 - 不要提交 token、私有 API 地址、生成产物或本地浏览器 profile。
 
 ## 项目结构
 
-- `cuecast/`：Manifest V3 Chrome 扩展，用于录制和回放 UI 测试用例。默认只读，不要改动。
-- `playwright-runner/`：Node.js ESM Playwright Runner，用于执行 CueCast 录制的步骤。源码位于 `playwright-runner/src/`。
-- `test-lab/`：本地 mock 应用和 mock API，用于开发、调试和 Runner 验证。种子用例数据位于 `test-lab/mock-data/cases.json`。
+- `../sakura-cuecast/`：Manifest V3 Chrome 扩展和 `test-lab`，用于录制、人工回放和本地 mock 验证。默认只读，不要改动。
+- `src/`：Node.js ESM Playwright Runner 源码；根级文件是 CLI 入口，内部模块按 `api/`、`runner/`、`reporting/`、`shared/` 分类。
+- `package.json`、`playwright.config.js`：项目依赖、命令和 Playwright Test 配置。
+- `tests/`：导出脚本的 Playwright 端到端验证用例。
+- `tools/focus-extension/`：有头回放时用于窗口聚焦的辅助扩展。
+- `../sakura-cuecast/test-lab/`：本地 mock 应用和 mock API，用于开发、调试和 Runner 验证。种子用例数据位于 `../sakura-cuecast/test-lab/mock-data/cases.json`。
 - `docs/`：方案设计、实现说明、操作手册和阶段完成记录。
-- `playwright-runner-artifacts/`：Runner 生成产物目录，不作为源码维护。
+- `artifacts/`、`playwright-runner-artifacts/`：Runner 生成产物目录，不作为源码维护。
 
 ## 常用命令
 
 除非特别说明，命令都从仓库根目录执行。
 
 ```bash
-npm --prefix playwright-runner install
-npm --prefix playwright-runner exec playwright install chromium
-node test-lab/mock-server.js --port 4173
-npm --prefix playwright-runner run check
-node playwright-runner/src/index.js --case-id 278 --api-base http://127.0.0.1:4173/api --headed false
+npm install
+npm exec -- playwright install chromium
+node ../sakura-cuecast/test-lab/mock-server.js --port 4173
+npm run check
+node src/index.js --case-id 278 --api-base http://127.0.0.1:4173/api --headed false
 ```
 
-- `npm --prefix playwright-runner install`：安装 Runner 依赖。
-- `npm --prefix playwright-runner exec playwright install chromium`：安装本地执行所需的 Chromium。
-- `node test-lab/mock-server.js --port 4173`：启动 mock UI 和 API，访问地址为 `http://127.0.0.1:4173/`。
-- `npm --prefix playwright-runner run check`：检查 Runner 源码语法。
-- `node playwright-runner/src/index.js`：执行指定用例并生成执行产物。
+- `npm install`：安装 Runner 依赖。
+- `npm exec -- playwright install chromium`：安装本地执行所需的 Chromium。
+- `node ../sakura-cuecast/test-lab/mock-server.js --port 4173`：启动 mock UI 和 API，访问地址为 `http://127.0.0.1:4173/`。
+- `npm run check`：检查 Runner 源码语法。
+- `node src/index.js`：执行指定用例并生成执行产物。
 
 ## 代码风格
 
@@ -52,18 +55,18 @@ node playwright-runner/src/index.js --case-id 278 --api-base http://127.0.0.1:41
 
 ## 测试要求
 
-- 提交变更前至少运行 `npm --prefix playwright-runner run check`。
+- 提交变更前至少运行 `npm run check`。
 - 涉及 Runner 回放能力时，需要结合 mock lab 验证 case `278` 或相关新增用例。
-- 新增步骤行为时，应在 `test-lab/mock-data/cases.json` 中补充 mock 用例。
+- 新增步骤行为时，应在 `../sakura-cuecast/test-lab/mock-data/cases.json` 中补充 mock 用例。
 - 验证执行结果时，检查 `result.json`、截图、trace、video 或 batch summary。
 - 每个阶段完成后，更新对应阶段完成记录，方便对比方案和验收结果。
 
 ## 配置与安全
 
-- Runner 本地配置优先放在 `playwright-runner/.env`。
-- 可提交示例配置 `playwright-runner/.env.example`，不要提交真实 token。
+- Runner 本地配置优先放在 `.env`。
+- 可提交示例配置 `.env.example`，不要提交真实 token。
 - 真实环境变量、账号信息、登录态文件和浏览器 profile 不应进入 Git。
-- `cuecast/manifest.json` 权限应保持收敛；如果用户明确要求修改扩展权限，需要在文档或 PR 说明原因和影响范围。
+- `../sakura-cuecast/manifest.json` 权限应保持收敛；如果用户明确要求修改扩展权限，需要在文档或 PR 说明原因和影响范围。
 
 ## 提交与 Pull Request
 

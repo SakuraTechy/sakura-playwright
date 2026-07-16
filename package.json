@@ -1,0 +1,21 @@
+{
+  "name": "sakura-playwright",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Playwright runner, batch execution and script exporters for Sakura automation.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "run:case": "node src/index.js",
+    "run:batch": "node src/batch.js",
+    "export:playwright": "node src/export-playwright.js",
+    "export:pytest": "node src/export-pytest.js",
+    "test:unit": "node --test tests/unit/runner-config.test.js",
+    "check": "node --check playwright.config.js && node --check src/index.js && node --check src/batch.js && node --check src/export-playwright.js && node --check src/export-pytest.js && node --check src/api/api-client.js && node --check src/runner/case-loader.js && node --check src/runner/step-runner.js && node --check src/runner/locator-resolver.js && node --check src/reporting/result-reporter.js && node --check src/reporting/artifacts.js && node --check src/shared/utils.js"
+  },
+  "dependencies": {
+    "playwright": "1.61.1"
+  }
+}

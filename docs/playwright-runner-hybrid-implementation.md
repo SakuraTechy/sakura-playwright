@@ -6,7 +6,7 @@
 
 这条路线不推翻当前 CueCast 已有的低代码录制体验，也不强行把所有能力一次性迁移到 Playwright。扩展继续负责用户侧录制、步骤采集、截图和中台联动；新增 Playwright Runner 负责批量执行、CI 回归、trace/video、并发和稳定报告。
 
-目标不是立刻替换现有 `cuecast/modules/player-manager.js` 的 CDP 回放，而是形成两个执行通道：
+目标不是立刻替换现有 `../sakura-cuecast/modules/player-manager.js` 的 CDP 回放，而是形成两个执行通道：
 
 - 浏览器回放：现有 Chrome Extension + CDP，适合录制后立即验证、复用当前浏览器状态。
 - Runner 回放：新增 Playwright Runner，适合 CI、批量回归、异步任务、稳定报告。
@@ -15,12 +15,12 @@
 
 当前项目已经具备完整的录制和扩展内回放能力：
 
-- `cuecast/content/recorder.js` 采集用户操作。
-- `cuecast/content/selector-core.js` 生成 CSS/XPath。
+- `../sakura-cuecast/content/recorder.js` 采集用户操作。
+- `../sakura-cuecast/content/selector-core.js` 生成 CSS/XPath。
 - `locator_meta` 保存多候选定位器和上下文。
-- `cuecast/modules/recorder-manager.js` 管理录制生命周期和保存步骤。
-- `cuecast/modules/player-manager.js` 通过 Chrome Debugger Protocol 优先执行回放。
-- `cuecast/content/player.js` 提供 DOM 降级回放。
+- `../sakura-cuecast/modules/recorder-manager.js` 管理录制生命周期和保存步骤。
+- `../sakura-cuecast/modules/player-manager.js` 通过 Chrome Debugger Protocol 优先执行回放。
+- `../sakura-cuecast/content/player.js` 提供 DOM 降级回放。
 
 当前方案的强项是低代码产品体验和真实浏览器内录制。短板是长期维护自研执行引擎成本高，特别是等待策略、定位策略、报告、并发、trace、CI 接入、跨浏览器能力都需要自己补。
 
@@ -73,17 +73,17 @@ M1 的目标是验证 Playwright Runner 这条执行通道是否可行，因此�
 
 第一阶段允许：
 
-- 新增 `playwright-runner/`：实现独立 Playwright Runner。
+- 在 `sakura-playwright` 仓库根目录建立独立 Node.js Playwright 项目。
 - 修改 `docs/`：补充方案、运行说明和验证记录。
-- 修改 `test-lab/`：补 mock API、mock case 或验证页面。
+- 修改 `../sakura-cuecast/test-lab/`：补 mock API、mock case 或验证页面。
 
 第一阶段不修改：
 
-- `cuecast/content/`
-- `cuecast/modules/`
-- `cuecast/popup/`
-- `cuecast/background.js`
-- `cuecast/manifest.json`
+- `../sakura-cuecast/content/`
+- `../sakura-cuecast/modules/`
+- `../sakura-cuecast/popup/`
+- `../sakura-cuecast/background.js`
+- `../sakura-cuecast/manifest.json`
 
 也就是说，M1 不改变现有 Chrome 扩展的录制和回放逻辑，不影响当前用户路径。只有当 Runner 在 mock 用例和少量真实用例上验证通过后，才进入后续阶段评估是否增强录制端 `locator_meta`、增加中台 Runner 入口，或调整扩展与后端的联动。
 
@@ -153,44 +153,51 @@ Playwright Runner 不应该只消费 `target_selector` 和 `target_xpath`。当�
 
 Runner 要复用这些信息，才能继承当前扩展定位策略的积累。
 
-## 阶段 2：新增 Playwright Runner 目录和最小执行器
+## 阶段 2：建立 Playwright 项目和最小执行器
 
 当前在项目根目录使用：
 
 ```text
-playwright-runner/
+sakura-playwright/
   package.json
   playwright.config.js
   src/
     index.js
-    api-client.js
-    case-loader.js
-    step-runner.js
-    locator-resolver.js
-    result-reporter.js
-    artifacts.js
-    utils.js
+    batch.js
+    export-playwright.js
+    export-pytest.js
+    api/
+      api-client.js
+    runner/
+      case-loader.js
+      step-runner.js
+      locator-resolver.js
+    reporting/
+      result-reporter.js
+      artifacts.js
+    shared/
+      utils.js
 ```
 
 ### 模块职责
 
 | 文件 | 职责 |
 | --- | --- |
-| `index.js` | CLI / 服务入口，解析参数，启动任务 |
-| `api-client.js` | 调后端接口，读取用例，回传结果 |
-| `case-loader.js` | 规范化 test case 和 steps |
-| `step-runner.js` | 将 action_type 映射为 Playwright 操作 |
-| `locator-resolver.js` | 根据 step 和 locator_meta 找元素 |
-| `result-reporter.js` | 组装执行结果并回传 |
-| `artifacts.js` | 管理 screenshot / trace / video / log |
-| `utils.js` | 通用解析、等待、日志工具 |
+| `src/index.js` | CLI / 服务入口，解析参数，启动任务 |
+| `src/api/api-client.js` | 调后端接口，读取用例，回传结果 |
+| `src/runner/case-loader.js` | 规范化 test case 和 steps |
+| `src/runner/step-runner.js` | 将 action_type 映射为 Playwright 操作 |
+| `src/runner/locator-resolver.js` | 根据 step 和 locator_meta 找元素 |
+| `src/reporting/result-reporter.js` | 组装执行结果并回传 |
+| `src/reporting/artifacts.js` | 管理 screenshot / trace / video / log |
+| `src/shared/utils.js` | 通用解析、等待、日志工具 |
 
 ### CLI 入口
 
 第一期先做命令行，降低接入复杂度。以下命令默认从仓库根目录执行：
 
 ```bash
-node playwright-runner/src/index.js --case-id 278 --api-base http://127.0.0.1:4173/api --headed false
+node src/index.js --case-id 278 --api-base http://127.0.0.1:4173/api --headed false
 ```
 
 建议参数：
@@ -482,7 +489,7 @@ async function runStep(page, step) {
 
 ## 阶段 6：表格、浮层、树的专项迁移
 
-第一期只做基础定位后，复杂用例的稳定性不会立刻达到扩展 CDP 回放水平。需要分批迁移当前 `cuecast/content/player.js` 中的定位经验。
+第一期只做基础定位后，复杂用例的稳定性不会立刻达到扩展 CDP 回放水平。需要分批迁移当前 `../sakura-cuecast/content/player.js` 中的定位经验。
 
 ### 表格定位
 
@@ -558,8 +565,8 @@ async function runStep(page, step) {
   "run_id": "20260704-001",
   "executor": "playwright-runner",
   "status": "failed",
-  "started_at": "2026-07-04T10:00:00.000Z",
-  "finished_at": "2026-07-04T10:00:15.000Z",
+  "started_at": "2026-07-04 18:00:00",
+  "finished_at": "2026-07-04 18:00:15",
   "duration_ms": 15000,
   "browser": "chromium",
   "headless": true,
@@ -638,6 +645,43 @@ POST /runs/{run_id}/artifacts
 - locator_source
 - error message
 
+### 扩展 CDP 回放接入 admin（阶段 4 补充）
+
+阶段 4 的“Runner 读取 admin 数据执行”不能只覆盖 Node Playwright Runner。扩展内回放仍是录制后即时验证和复用当前 Chrome 登录态的执行器，因此也必须从 admin 读取同一份可执行 case。实现采用共享接口、双执行器：
+
+```text
+admin-ui 选中场景用例
+  -> window.postMessage(AT_PLATFORM_PLAY, adminCaseKey=sceneId:caseId)
+  -> CueCast bridge/background
+  -> GET /automation/playwright/testcases/{sceneId}/{caseId}
+  -> PlayerManager 复用现有 CDP 优先 / DOM 降级执行
+  -> POST /automation/playwright/testcases/{sceneId}/{caseId}/results
+```
+
+#### 接口和字段约束
+
+| 项目 | 约定 |
+| --- | --- |
+| case key | 业务 `sceneId:caseId`，例如 `AAS_P_SMOKE_006:SCENE_CASE_001`；后端兼容数据库场景主键 |
+| 执行事实来源 | 响应 `steps[]` 中的完整 `playwright_step` 反向提取结果 |
+| 定位上下文 | `locator_meta` 原样返回并交给 CueCast 现有定位器 |
+| 扩展结果 executor | `extension-cdp` |
+| 结果接口 | 与 Playwright Runner 共用 `/results`，`raw.executor` 区分执行器 |
+| 鉴权 | CueCast 从 admin-ui 当前登录 token 发送 Bearer token；后端读取/更新权限不放开匿名访问 |
+
+扩展只负责请求、执行和回传，不在前端或 Service Worker 中重新拼装 `AutomationUiSceneDO -> CaseDO -> StepDO`。旧的 `GET /testcases/{id}` 和 `AT_PLATFORM_PLAY` 调用仍保留，只有携带 `adminCaseKey` 或 `dataSource=admin` 时切换到 admin API。
+
+#### 与 test-lab CDP 回放的关系
+
+`sakura-cuecast/test-lab` 继续作为扩展消息链路的本地验证入口：它通过 `AT_PLATFORM_PLAY` 触发 `background.js -> PlayerManager.start()`，验证 CDP attach、步骤执行、失败通知和停止逻辑。本次补充只是让同一个入口在 admin-ui 场景下把 `adminCaseKey` 传到扩展，并将结果改为回写 admin；不复制 test-lab 的 mock 数据结构，也不改变现有 `PlayerManager` 的复杂定位实现。
+
+#### 失败和兼容策略
+
+1. admin case 拉取失败时，扩展立即提示接口/权限错误，不回退到同名旧 case，避免执行错误数据。
+2. CDP attach 或跨扩展页面受限时，继续使用现有 DOM 降级规则；需要 CDP 的 AI/JSON 步骤仍明确失败。
+3. admin 结果回传失败不覆盖本地回放成功状态；扩展通知用户“执行完成但结果回传失败”，后续可通过本地日志排查。
+4. 未携带 `adminCaseKey` 的旧调用继续使用 CueCast mock/旧 API，保证 test-lab 和历史入口不变。
+
 ## 阶段 9：CI/CD 接入
 
 Runner 稳定后，可以加入 CI。
@@ -660,9 +704,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm --prefix playwright-runner ci
-      - run: npm --prefix playwright-runner exec playwright install --with-deps chromium
-      - run: node playwright-runner/src/index.js --case-id 278 --api-base ${{ secrets.CUECAST_API_BASE }} --trace retain-on-failure
+      - run: npm ci
+      - run: npm exec -- playwright install --with-deps chromium
+      - run: node src/index.js --case-id 278 --api-base ${{ secrets.CUECAST_API_BASE }} --trace retain-on-failure
 ```
 
 ### 批量执行策略
@@ -699,8 +743,8 @@ Playwright Runner 不天然复用用户当前 Chrome 登录态，需要设计登
 
 交付：
 
-- 新增 `playwright-runner/`。
-- 仅允许修改 `docs/` 和 `test-lab/`，不改现有扩展运行逻辑。
+- 在仓库根目录建立完整 Node.js Playwright 项目。
+- 仅允许修改 `docs/` 和 `../sakura-cuecast/test-lab/`，不改现有扩展运行逻辑。
 - CLI 可根据 case_id 拉取用例。
 - 支持 Chromium headless 执行。
 - 支持 `navigate/click/input/key/wait/assert_text`。
@@ -1142,7 +1186,7 @@ Playwright 自带 actionability 和 auto-wait，但 Runner 仍需要统一页面
 
 M1 可以拆成以下开发任务：
 
-1. 创建 `playwright-runner/` Node 项目，接入 Playwright。
+1. 创建仓库根级 Node 项目，接入 Playwright。
 2. 实现 CLI 参数解析和配置合并。
 3. 实现 `ApiClient.getTestCase()`。
 4. 实现 `runCase()` 主流程。
@@ -1162,7 +1206,7 @@ M1 验收标准：
 
 ## 建议下一步
 
-1. 在 `playwright-runner/` 下创建最小 Node + Playwright 项目。
+1. 在仓库根目录创建最小 Node + Playwright 项目。
 2. 实现 `ApiClient.getTestCase(caseId)`。
 3. 实现 `runCase()` 和 `runStep()`。
 4. 实现基础 `resolveLocator()`。

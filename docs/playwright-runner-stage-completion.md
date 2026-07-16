@@ -30,6 +30,52 @@
 | M4 | CI 和批量执行 | 通过 | 批量入口、mock 批量 job API、CI 模板已实现并通过本地 mock 验收 |
 | M5 | 高级能力 | 部分通过 | M5-A 至 M5-O 已完成 iframe、文件上传、多文件上传、隐藏上传代理、下载断言、高级下载校验、二进制下载校验、JSON/API、Monaco 输入、Monaco 快捷键、树定位、展开/复选树、多窗口基础切换、多窗口显式切换和关闭、多 popup 选择、网络 mock、类 HAR 回放、请求断言、响应断言、响应快照、快照基线对比、请求数量断言、失败注入专项 case、Playwright/pytest 脚本导出、复杂定位导出、高级动作导出和导出 Playwright 端到端执行并通过 mock 验收 |
 
+## 2026-07-15：工程目录重构
+
+### 完成情况
+
+| 事项 | 结果 |
+| --- | --- |
+| 项目根目录 | `package.json`、`package-lock.json`、`playwright.config.js`、`.env.example` 和 `README.md` 已提升到 `sakura-playwright/` 根目录 |
+| CLI 入口 | 保留 `src/index.js`、`src/batch.js`、`src/export-playwright.js`、`src/export-pytest.js` 作为稳定入口 |
+| 源码分类 | 内部模块按 `src/api/`、`src/runner/`、`src/reporting/`、`src/shared/` 分类 |
+| 配套目录 | 测试提升到 `tests/`，窗口聚焦辅助扩展迁移到 `tools/focus-extension/` |
+| 调用方 | admin 默认 Runner 根目录和 CueCast test-lab 启动路径已同步到新结构 |
+| 文档与 CI | README、操作手册、方案、阶段记录、工作区接入文档和 GitHub Actions 路径已同步 |
+
+### 验证
+
+- `npm run check`：通过。
+- `npm exec -- playwright test --list --config=playwright.config.js`：通过，识别 `tests/` 下 2 个用例。
+- `node --check ../sakura-cuecast/test-lab/mock-server.js`：通过。
+- `node --check ../sakura-cuecast/test-lab/app.js`：通过。
+- `node src/index.js --case-id 278 --api-base http://127.0.0.1:4273/api --headed false --trace off --video off`：通过。
+- CueCast test-lab Runner Job 与 Batch Job：均通过，实际命令分别指向 `src/index.js` 和 `src/batch.js`。
+- CueCast test-lab 请求 `/artifacts/batches/<batchId>/report.html`：返回 HTTP `200`，新 artifact 映射可访问。
+- `mvn -pl continew-automation -am -DskipTests compile`：通过。
+
+## 2026-07-15：admin 产品环境回放配置
+
+### 完成情况
+
+| 事项 | 结果 |
+| --- | --- |
+| 共用弹窗 | CDP 与 Runner 使用 Jenkins 同款双卡片排版；产品环境必选，自动化环境已移除 |
+| 环境快照 | admin 按产品环境生成临时执行快照，替换绝对 HTTP(S) 地址的 Origin 并保留路径、查询和锚点，不修改主数据 |
+| CDP 配置 | 支持最大化、当前窗口、自定义宽高和页面错误检测；执行记录保存有效环境、地址和配置快照 |
+| Runner 配置 | 单任务支持 browser、headed、HTTPS、trace/video、step/case timeout、slowMo 和 finishDelay 白名单参数 |
+| Runner 总超时 | `RUNNER_CASE_TIMEOUT_MS`/`--case-timeout` 已实际包裹用例执行，超时会关闭 context/browser 并回传失败 |
+| Jenkins 回归边界 | 未修改 `ExecuteSceneModal.vue`、Jenkins DTO、`AutomationUiSceneServiceImpl.exec()` 或参数构造 |
+
+### 验证
+
+- `npm run check`：通过。
+- `npm run test:unit`：通过，覆盖 CLI 优先级、产品环境查询参数和总超时清理。
+- admin 后端环境地址改写、环境归属、错误上下文和主数据不变测试：7 个测试通过。
+- CueCast `background.js`、`modules/api-client.js`、`modules/player-manager.js`：`node --check` 通过。
+- admin-ui `pnpm typecheck`：通过。
+- 真实 `.45/.47` 环境、浏览器产物和 Jenkins 回归仍需按部署环境人工验收。
+
 ## M1：最小 Runner 可用
 
 ### 计划目标
@@ -40,12 +86,12 @@ M1 目标是验证 Playwright Runner 执行通道是否可行。第一阶段不�
 
 | 计划交付 | 实际完成情况 | 状态 | 说明 |
 | --- | --- | --- | --- |
-| 新增 `playwright-runner/` | 已新增 Node ESM 项目、Playwright 配置和 Runner 源码 | 通过 | 包含 `package.json`、`playwright.config.js`、`src/` |
-| 不修改现有扩展运行逻辑 | Runner 作为独立目录存在 | 通过 | 未替换 `cuecast` 内 CDP 回放 |
-| CLI 可根据 `case_id` 拉取用例 | 已实现 `--case-id`、`--api-base` 等参数 | 通过 | 入口为 `playwright-runner/src/index.js` |
+| 建立 Node.js Playwright 项目 | 已新增 Node ESM 项目、Playwright 配置和 Runner 源码 | 通过 | 包含 `package.json`、`playwright.config.js`、`src/` |
+| 不修改现有扩展运行逻辑 | Runner 作为独立项目存在 | 通过 | 未替换 `cuecast` 内 CDP 回放 |
+| CLI 可根据 `case_id` 拉取用例 | 已实现 `--case-id`、`--api-base` 等参数 | 通过 | 入口为 `src/index.js` |
 | 支持 Chromium headless 执行 | 已通过本地 headless 验证 | 通过 | mock case 278 通过 |
-| 支持基础动作 | 已支持 `navigate/click/input/key/wait/assert_text`，并额外支持 `double_click/right_click/hover/scroll` | 通过 | 见 `playwright-runner/src/step-runner.js` |
-| 支持基础定位 | 已支持 CSS、XPath、text exact、部分 `locator_meta.candidates` | 通过 | 见 `playwright-runner/src/locator-resolver.js` |
+| 支持基础动作 | 已支持 `navigate/click/input/key/wait/assert_text`，并额外支持 `double_click/right_click/hover/scroll` | 通过 | 见 `src/runner/step-runner.js` |
+| 支持基础定位 | 已支持 CSS、XPath、text exact、部分 `locator_meta.candidates` | 通过 | 见 `src/runner/locator-resolver.js` |
 | 失败截图和 `result.json` | 已实现 `result.json`、`failure.png`、`failure.html` | 通过 | case 280 验证了失败产物 |
 | 回传基础执行结果 | 已实现 `POST /testcases/{id}/results` | 通过 | mock server 接收执行结果 |
 
@@ -53,8 +99,8 @@ M1 目标是验证 Playwright Runner 执行通道是否可行。第一阶段不�
 
 | 时间 | 命令 | 结果 | 产物 |
 | --- | --- | --- | --- |
-| 2026-07-04 | `npm --prefix playwright-runner run check` | 通过 | 无 |
-| 2026-07-04 | `node playwright-runner/src/index.js --case-id 278 --api-base http://127.0.0.1:4174/api --headed false` | 通过 | `playwright-runner-artifacts/runs/278-20260704-165349/` |
+| 2026-07-04 | `npm run check` | 通过 | 无 |
+| 2026-07-04 | `node src/index.js --case-id 278 --api-base http://127.0.0.1:4174/api --headed false` | 通过 | `playwright-runner-artifacts/runs/278-20260704-165349/` |
 
 ### 阶段结论
 
@@ -97,10 +143,10 @@ M1 已完成，可以进入后续定位能力增强。
 
 | 时间 | 命令 | 结果 | 产物 |
 | --- | --- | --- | --- |
-| 2026-07-04 | `npm --prefix playwright-runner run check` | 通过 | 无 |
-| 2026-07-04 | `node playwright-runner/src/index.js --case-id 278 --api-base http://127.0.0.1:4174/api --headed false` | 通过，M1 回归未破坏 | `playwright-runner-artifacts/runs/278-20260704-165349/` |
-| 2026-07-04 | `node playwright-runner/src/index.js --case-id 279 --api-base http://127.0.0.1:4174/api --headed false` | 通过，覆盖表格、浮层、自定义 select | `playwright-runner-artifacts/runs/279-20260704-165405/` |
-| 2026-07-04 | `node playwright-runner/src/index.js --case-id 280 --api-base http://127.0.0.1:4174/api --headed false` | 按预期失败，返回 `LOCATOR_AMBIGUOUS` | `playwright-runner-artifacts/runs/280-20260704-165414/` |
+| 2026-07-04 | `npm run check` | 通过 | 无 |
+| 2026-07-04 | `node src/index.js --case-id 278 --api-base http://127.0.0.1:4174/api --headed false` | 通过，M1 回归未破坏 | `playwright-runner-artifacts/runs/278-20260704-165349/` |
+| 2026-07-04 | `node src/index.js --case-id 279 --api-base http://127.0.0.1:4174/api --headed false` | 通过，覆盖表格、浮层、自定义 select | `playwright-runner-artifacts/runs/279-20260704-165405/` |
+| 2026-07-04 | `node src/index.js --case-id 280 --api-base http://127.0.0.1:4174/api --headed false` | 按预期失败，返回 `LOCATOR_AMBIGUOUS` | `playwright-runner-artifacts/runs/280-20260704-165414/` |
 
 ### 遗留问题
 
@@ -137,15 +183,15 @@ M2 分批目标已完成并通过本地 mock 验证；完整 M2 仍需结合真�
 
 | 时间 | 命令 | 结果 | 产物 |
 | --- | --- | --- | --- |
-| 2026-07-04 | `npm --prefix playwright-runner run check` | 通过 | 无 |
-| 2026-07-04 | `node --check test-lab/mock-server.js` | 通过 | 无 |
-| 2026-07-04 | `node --check test-lab/app.js` | 通过 | 无 |
-| 2026-07-04 | `node playwright-runner/src/index.js --case-id 280 --api-base http://127.0.0.1:4175/api --headed false --trace retain-on-failure --video retain-on-failure` | 按预期失败，保留失败 artifact | `playwright-runner-artifacts/runs/280-20260704-172347/` |
+| 2026-07-04 | `npm run check` | 通过 | 无 |
+| 2026-07-04 | `node --check ../sakura-cuecast/test-lab/mock-server.js` | 通过 | 无 |
+| 2026-07-04 | `node --check ../sakura-cuecast/test-lab/app.js` | 通过 | 无 |
+| 2026-07-04 | `node src/index.js --case-id 280 --api-base http://127.0.0.1:4175/api --headed false --trace retain-on-failure --video retain-on-failure` | 按预期失败，保留失败 artifact | `playwright-runner-artifacts/runs/280-20260704-172347/` |
 | 2026-07-04 | `POST /api/runner/jobs` case 279 | 异步 job 通过，结果回写执行历史 | `playwright-runner-artifacts/runs/279-20260704-172315/` |
 
 ### 遗留问题
 
-- 当前 Runner job 只在 `test-lab/mock-server.js` 内存中维护，服务重启后 job 状态不保留。
+- 当前 Runner job 只在 `../sakura-cuecast/test-lab/mock-server.js` 内存中维护，服务重启后 job 状态不保留。
 - 当前中台 artifact 链接为本地静态路径，真实环境仍需要对象存储或后端 artifact URL。
 - 真实中台的执行模式选择、权限控制、任务取消、任务队列仍未接入。
 - 成功用例在 `retain-on-failure` 下只保留 report 和 console log，不保留 trace/video；如需成功也保留，使用 `--trace on --video on`。
@@ -173,26 +219,26 @@ M3 的本地报告、artifact 管理、mock 中台 Runner 回放和异步 job �
 
 | 计划交付 | 实际完成情况 | 状态 | 说明 |
 | --- | --- | --- | --- |
-| 批量运行入口 | 已新增 `playwright-runner/src/batch.js` 和 `npm run run:batch` | 通过 | 支持 `--case-ids` |
+| 批量运行入口 | 已新增 `src/batch.js` 和 `npm run run:batch` | 通过 | 支持 `--case-ids` |
 | 并发 worker | 已支持 `--workers`，默认 `1` | 通过 | case 级有限并发已验证 |
 | 独立 case artifact | 批量内每个 case 复用单 case Runner 流程 | 通过 | 产物位于 `runs/<caseId>-<timestamp>/` |
 | 批量汇总报告 | 已实现 `summary.json` 和 `report.html` | 通过 | 产物位于 `batches/<batchId>/` |
 | 环境变量配置 | 已支持 `CUECAST_CASE_IDS`、`RUNNER_WORKERS`、`RUNNER_TRACE`、`RUNNER_VIDEO`、`RUNNER_ARTIFACT_DIR` 等 | 通过 | 已验证 env 入口，CLI 参数优先由解析逻辑保证 |
 | Mock 批量 job API | 已新增 `POST/GET /api/runner/batches` | 通过 | 已模拟中台批量触发 |
 | CI 模板 | 已新增 `.github/workflows/cuecast-runner.yml` | 通过 | 默认跑 mock case `278,279`，本地检查命令路径 |
-| README | 已补充 M4 批量执行和 CI 验证说明 | 通过 | `playwright-runner/README.md` |
+| README | 已补充 M4 批量执行和 CI 验证说明 | 通过 | `README.md` |
 
 ### 已执行验证
 
 | 时间 | 命令 | 结果 | 产物 |
 | --- | --- | --- | --- |
-| 2026-07-04 | `npm --prefix playwright-runner run check` | 通过 | 无 |
-| 2026-07-04 | `node --check test-lab/mock-server.js` | 通过 | 无 |
-| 2026-07-04 | `node --check test-lab/app.js` | 通过 | 无 |
-| 2026-07-04 | `node playwright-runner/src/batch.js --case-ids 278,279 --api-base http://127.0.0.1:4176/api --workers 1` | 通过，退出码 `0`，两个 case passed | `playwright-runner-artifacts/batches/batch-20260704-175748/` |
-| 2026-07-04 | `node playwright-runner/src/batch.js --case-ids 278,280 --api-base http://127.0.0.1:4176/api --workers 1` | 按预期失败，退出码非 `0`，case 280 failed | `playwright-runner-artifacts/batches/batch-20260704-175801/` |
-| 2026-07-04 | `node playwright-runner/src/batch.js --case-ids 278,279 --api-base http://127.0.0.1:4176/api --workers 2` | 通过，两个 case 独立产物，summary 正确 | `playwright-runner-artifacts/batches/batch-20260704-175822/` |
-| 2026-07-04 | `CUECAST_CASE_IDS=278,279 RUNNER_WORKERS=2 CUECAST_API_BASE=http://127.0.0.1:4176/api node playwright-runner/src/batch.js` | 通过，env 入口生效，summary 显示 `workers: 2` | `playwright-runner-artifacts/batches/batch-20260704-175907/` |
+| 2026-07-04 | `npm run check` | 通过 | 无 |
+| 2026-07-04 | `node --check ../sakura-cuecast/test-lab/mock-server.js` | 通过 | 无 |
+| 2026-07-04 | `node --check ../sakura-cuecast/test-lab/app.js` | 通过 | 无 |
+| 2026-07-04 | `node src/batch.js --case-ids 278,279 --api-base http://127.0.0.1:4176/api --workers 1` | 通过，退出码 `0`，两个 case passed | `playwright-runner-artifacts/batches/batch-20260704-175748/` |
+| 2026-07-04 | `node src/batch.js --case-ids 278,280 --api-base http://127.0.0.1:4176/api --workers 1` | 按预期失败，退出码非 `0`，case 280 failed | `playwright-runner-artifacts/batches/batch-20260704-175801/` |
+| 2026-07-04 | `node src/batch.js --case-ids 278,279 --api-base http://127.0.0.1:4176/api --workers 2` | 通过，两个 case 独立产物，summary 正确 | `playwright-runner-artifacts/batches/batch-20260704-175822/` |
+| 2026-07-04 | `CUECAST_CASE_IDS=278,279 RUNNER_WORKERS=2 CUECAST_API_BASE=http://127.0.0.1:4176/api node src/batch.js` | 通过，env 入口生效，summary 显示 `workers: 2` | `playwright-runner-artifacts/batches/batch-20260704-175907/` |
 | 2026-07-04 | `POST /api/runner/batches` | 通过，batch job 状态为 `passed`，退出码 `0` | `playwright-runner-artifacts/batches/batch-20260704-175835/` |
 
 ### 遗留问题
@@ -241,12 +287,12 @@ M5 是持续迭代阶段，本轮先实现可本地验证、可保留 mock 用�
 
 - 网络 mock：新增 `network_mock` action，通过 Playwright route mock 指定 URL/pattern。
 - API JSON 断言增强：`assert_json` API 模式支持 `method`、`headers`、`body/json`。
-- Playwright 脚本导出：新增 `playwright-runner/src/export-playwright.js` 和 npm script `export:playwright`。
+- Playwright 脚本导出：新增 `src/export-playwright.js` 和 npm script `export:playwright`。
 - test-lab 新增 case `283`，覆盖网络 mock 和 POST API JSON 断言。
 
 ### M5-D 本轮分批目标
 
-- pytest 脚本导出：新增 `playwright-runner/src/export-pytest.js` 和 npm script `export:pytest`。
+- pytest 脚本导出：新增 `src/export-pytest.js` 和 npm script `export:pytest`。
 - 生成 pytest + Playwright sync API 风格脚本。
 - 对导出文件执行 Python 语法编译检查。
 
@@ -291,13 +337,13 @@ M5 是持续迭代阶段，本轮先实现可本地验证、可保留 mock 用�
 - `assert_response` 支持 `baselinePath` 和 `baselineMode` 配置。
 - 支持 JSON 精确对比、JSON 子集对比和文本对比。
 - 成功 step 记录 `response_baseline`、`response_baseline_mode` 和 `response_baseline_matched`。
-- test-lab 新增响应基线文件 `test-lab/response-baselines/m5j-profile.json`。
+- test-lab 新增响应基线文件 `../sakura-cuecast/test-lab/response-baselines/m5j-profile.json`。
 - test-lab 新增 case `288`，覆盖响应基线对比、响应快照和页面渲染断言。
 
 ### M5-K 本轮分批目标
 
 - 新增 `network_replay` action。
-- 支持从 `test-lab/network-fixtures/*.json` 读取多条网络响应 fixture。
+- 支持从 `../sakura-cuecast/test-lab/network-fixtures/*.json` 读取多条网络响应 fixture。
 - 每条回放 entry 支持 URL/pattern、method、status、headers、json/body、delayMs 和 abort。
 - 成功 step 记录 `network_replay_path` 和 `network_replay_entries`。
 - test-lab 新增 case `289`，覆盖两条接口回放、页面渲染断言和请求数量断言。
@@ -349,58 +395,58 @@ M5 是持续迭代阶段，本轮先实现可本地验证、可保留 mock 用�
 
 | 时间 | 命令 | 结果 | 产物 |
 | --- | --- | --- | --- |
-| 2026-07-06 | `npm --prefix playwright-runner run check` | 通过 | 无 |
-| 2026-07-06 | `node --check test-lab/mock-server.js` | 通过 | 无 |
-| 2026-07-06 | `node playwright-runner/src/index.js --case-id 281 --api-base http://127.0.0.1:4177/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖 iframe、文件上传、下载断言、页面 JSON 和 API JSON 断言 | `playwright-runner-artifacts/runs/281-20260706-095906/` |
-| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281 --api-base http://127.0.0.1:4177/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M1/M2/M5-A 批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-095957/` |
-| 2026-07-06 | `node playwright-runner/src/index.js --case-id 282 --api-base http://127.0.0.1:4178/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖 Monaco 输入、树语义定位、多窗口基础切换 | `playwright-runner-artifacts/runs/282-20260706-105759/` |
-| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282 --api-base http://127.0.0.1:4178/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M1/M2/M5-A/M5-B 批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-105946/` |
-| 2026-07-06 | `node playwright-runner/src/index.js --case-id 283 --api-base http://127.0.0.1:4179/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖网络 mock 和 POST API JSON 断言 | `playwright-runner-artifacts/runs/283-20260706-111200/` |
-| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283 --api-base http://127.0.0.1:4179/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M1/M2/M5-A/M5-B/M5-C 批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-111310/` |
-| 2026-07-06 | `node playwright-runner/src/export-playwright.js --case-id 278 --api-base http://127.0.0.1:4179/api --output playwright-runner-artifacts\exports\case-278-m5c.spec.js` | 通过，生成 Playwright spec | `playwright-runner-artifacts/exports/case-278-m5c.spec.js` |
+| 2026-07-06 | `npm run check` | 通过 | 无 |
+| 2026-07-06 | `node --check ../sakura-cuecast/test-lab/mock-server.js` | 通过 | 无 |
+| 2026-07-06 | `node src/index.js --case-id 281 --api-base http://127.0.0.1:4177/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖 iframe、文件上传、下载断言、页面 JSON 和 API JSON 断言 | `playwright-runner-artifacts/runs/281-20260706-095906/` |
+| 2026-07-06 | `node src/batch.js --case-ids 278,279,281 --api-base http://127.0.0.1:4177/api --workers 2 --artifact-dir D:\King\sakura\sakura-playwright-artifacts` | 通过，M1/M2/M5-A 批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-095957/` |
+| 2026-07-06 | `node src/index.js --case-id 282 --api-base http://127.0.0.1:4178/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖 Monaco 输入、树语义定位、多窗口基础切换 | `playwright-runner-artifacts/runs/282-20260706-105759/` |
+| 2026-07-06 | `node src/batch.js --case-ids 278,279,281,282 --api-base http://127.0.0.1:4178/api --workers 2 --artifact-dir D:\King\sakura\sakura-playwright-artifacts` | 通过，M1/M2/M5-A/M5-B 批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-105946/` |
+| 2026-07-06 | `node src/index.js --case-id 283 --api-base http://127.0.0.1:4179/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖网络 mock 和 POST API JSON 断言 | `playwright-runner-artifacts/runs/283-20260706-111200/` |
+| 2026-07-06 | `node src/batch.js --case-ids 278,279,281,282,283 --api-base http://127.0.0.1:4179/api --workers 2 --artifact-dir D:\King\sakura\sakura-playwright-artifacts` | 通过，M1/M2/M5-A/M5-B/M5-C 批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-111310/` |
+| 2026-07-06 | `node src/export-playwright.js --case-id 278 --api-base http://127.0.0.1:4179/api --output playwright-runner-artifacts\exports\case-278-m5c.spec.js` | 通过，生成 Playwright spec | `playwright-runner-artifacts/exports/case-278-m5c.spec.js` |
 | 2026-07-06 | `node --check playwright-runner-artifacts\exports\case-278-m5c.spec.js` | 通过 | `playwright-runner-artifacts/exports/case-278-m5c.spec.js` |
-| 2026-07-06 | `node playwright-runner/src/export-pytest.js --case-id 278 --api-base http://127.0.0.1:4180/api --output playwright-runner-artifacts\exports\test_case_278_m5d.py` | 通过，生成 pytest 脚本 | `playwright-runner-artifacts/exports/test_case_278_m5d.py` |
+| 2026-07-06 | `node src/export-pytest.js --case-id 278 --api-base http://127.0.0.1:4180/api --output playwright-runner-artifacts\exports\test_case_278_m5d.py` | 通过，生成 pytest 脚本 | `playwright-runner-artifacts/exports/test_case_278_m5d.py` |
 | 2026-07-06 | `python -m py_compile playwright-runner-artifacts\exports\test_case_278_m5d.py` | 通过 | `playwright-runner-artifacts/exports/test_case_278_m5d.py` |
-| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283 --api-base http://127.0.0.1:4180/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M5-D 后批量回归仍全部 passed | `playwright-runner-artifacts/batches/batch-20260706-112435/` |
-| 2026-07-06 | `node playwright-runner/src/export-playwright.js --case-id 279 --api-base http://127.0.0.1:4181/api --output playwright-runner-artifacts\exports\case-279-m5e.spec.js` | 通过，表格/浮层用例导出 | `playwright-runner-artifacts/exports/case-279-m5e.spec.js` |
-| 2026-07-06 | `node playwright-runner/src/export-playwright.js --case-id 281 --api-base http://127.0.0.1:4181/api --output playwright-runner-artifacts\exports\case-281-m5e.spec.js` | 通过，iframe 用例导出 | `playwright-runner-artifacts/exports/case-281-m5e.spec.js` |
-| 2026-07-06 | `node playwright-runner/src/export-playwright.js --case-id 282 --api-base http://127.0.0.1:4181/api --output playwright-runner-artifacts\exports\case-282-m5e.spec.js` | 通过，树/多窗口用例导出 | `playwright-runner-artifacts/exports/case-282-m5e.spec.js` |
+| 2026-07-06 | `node src/batch.js --case-ids 278,279,281,282,283 --api-base http://127.0.0.1:4180/api --workers 2 --artifact-dir D:\King\sakura\sakura-playwright-artifacts` | 通过，M5-D 后批量回归仍全部 passed | `playwright-runner-artifacts/batches/batch-20260706-112435/` |
+| 2026-07-06 | `node src/export-playwright.js --case-id 279 --api-base http://127.0.0.1:4181/api --output playwright-runner-artifacts\exports\case-279-m5e.spec.js` | 通过，表格/浮层用例导出 | `playwright-runner-artifacts/exports/case-279-m5e.spec.js` |
+| 2026-07-06 | `node src/export-playwright.js --case-id 281 --api-base http://127.0.0.1:4181/api --output playwright-runner-artifacts\exports\case-281-m5e.spec.js` | 通过，iframe 用例导出 | `playwright-runner-artifacts/exports/case-281-m5e.spec.js` |
+| 2026-07-06 | `node src/export-playwright.js --case-id 282 --api-base http://127.0.0.1:4181/api --output playwright-runner-artifacts\exports\case-282-m5e.spec.js` | 通过，树/多窗口用例导出 | `playwright-runner-artifacts/exports/case-282-m5e.spec.js` |
 | 2026-07-06 | `node --check playwright-runner-artifacts\exports\case-279-m5e.spec.js` / `case-281-m5e.spec.js` / `case-282-m5e.spec.js` | 通过 | 对应 Playwright 导出文件 |
-| 2026-07-06 | `node playwright-runner/src/export-pytest.js --case-id 279/281/282 --api-base http://127.0.0.1:4181/api --output ...` | 通过，复杂定位 pytest 文件生成 | `playwright-runner-artifacts/exports/test_case_279_m5e.py` 等 |
+| 2026-07-06 | `node src/export-pytest.js --case-id 279/281/282 --api-base http://127.0.0.1:4181/api --output ...` | 通过，复杂定位 pytest 文件生成 | `playwright-runner-artifacts/exports/test_case_279_m5e.py` 等 |
 | 2026-07-06 | `python -m py_compile playwright-runner-artifacts\exports\test_case_279_m5e.py` / `test_case_281_m5e.py` / `test_case_282_m5e.py` | 通过 | 对应 pytest 导出文件 |
-| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283 --api-base http://127.0.0.1:4181/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M5-E 后批量回归仍全部 passed | `playwright-runner-artifacts/batches/batch-20260706-113640/` |
-| 2026-07-06 | `node playwright-runner/src/index.js --case-id 284 --api-base http://127.0.0.1:4182/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖请求 URL、method、body 断言 | `playwright-runner-artifacts/runs/284-20260706-115223/` |
-| 2026-07-06 | `node playwright-runner/src/index.js --case-id 279 --api-base http://127.0.0.1:4182/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，验证自定义 select 长页面回归修复 | `playwright-runner-artifacts/runs/279-20260706-115614/` |
-| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283,284 --api-base http://127.0.0.1:4182/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M5-F 后批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-115636/` |
-| 2026-07-06 | `node playwright-runner/src/index.js --case-id 285 --api-base http://127.0.0.1:4183/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖延迟 mock 和请求数量断言 | `playwright-runner-artifacts/runs/285-20260706-150446/` |
-| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283,284,285 --api-base http://127.0.0.1:4183/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M5-G 后批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-150618/` |
-| 2026-07-06 | `node playwright-runner/src/index.js --case-id 286 --api-base http://127.0.0.1:4184/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖响应 JSON 断言和 abort 失败注入专项验证 | `playwright-runner-artifacts/runs/286-20260706-151419/` |
-| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283,284,285,286 --api-base http://127.0.0.1:4184/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M5-H 后批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-151442/` |
-| 2026-07-06 | `node playwright-runner/src/index.js --case-id 287 --api-base http://127.0.0.1:4185/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖响应快照文件化和页面渲染断言 | `playwright-runner-artifacts/runs/287-20260706-153416/` |
-| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283,284,285,286,287 --api-base http://127.0.0.1:4185/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M5-I 后批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-153501/` |
-| 2026-07-06 | `node playwright-runner/src/index.js --case-id 288 --api-base http://127.0.0.1:4186/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖响应基线对比、快照和页面渲染断言 | `playwright-runner-artifacts/runs/288-20260706-155300/` |
-| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283,284,285,286,287,288 --api-base http://127.0.0.1:4186/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M5-J 后批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-155505/` |
-| 2026-07-06 | `node playwright-runner/src/index.js --case-id 289 --api-base http://127.0.0.1:4187/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖类 HAR 回放、页面渲染断言和请求数量断言 | `playwright-runner-artifacts/runs/289-20260706-161227/` |
-| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283,284,285,286,287,288,289 --api-base http://127.0.0.1:4187/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M5-K 后批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-161316/` |
-| 2026-07-06 | `node playwright-runner/src/index.js --case-id 290 --api-base http://127.0.0.1:4192/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖多文件上传、下载 MIME、大小、内容和 SHA256 校验 | `playwright-runner-artifacts/runs/290-20260706-175200/` |
-| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283,284,285,286,287,288,289,290 --api-base http://127.0.0.1:4194/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M5-L 后批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-175358/` |
-| 2026-07-06 | `npm --prefix playwright-runner run check` | 通过，M5-M 导出器源码语法检查通过 | 无 |
-| 2026-07-06 | `node playwright-runner/src/export-playwright.js --case-id 281/283/284/285/286/287/288/289/290 --api-base http://127.0.0.1:4197/api --output <temp>\case-*-m5m.spec.js` + `node --check <temp>\case-*-m5m.spec.js` | 通过，高级动作 Playwright spec 均可生成并通过语法检查 | `%TEMP%\cuecast-export-m5m-2\` |
-| 2026-07-06 | `node playwright-runner/src/export-pytest.js --case-id 281/283/284/285/286/287/288/289/290 --api-base http://127.0.0.1:4197/api --output <temp>\test_case_*_m5m.py` + `python -m py_compile <temp>\test_case_*_m5m.py` | 通过，高级动作 pytest 文件均可生成并通过 Python 编译检查 | `%TEMP%\cuecast-export-m5m-2\` |
-| 2026-07-06 | `npm --prefix playwright-runner run check` | 通过，M5-N Runner 和导出器源码语法检查通过 | 无 |
-| 2026-07-06 | `node --check test-lab/mock-server.js` | 通过，case 291 seed 语法检查通过 | 无 |
-| 2026-07-06 | `node playwright-runner/src/index.js --case-id 291 --api-base http://127.0.0.1:4195/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖打开 popup、显式切回主页面、按 URL 切回 popup、关闭 popup 并回主页面 | `playwright-runner-artifacts/runs/291-20260706-184309/` |
-| 2026-07-06 | `node playwright-runner/src/export-playwright.js --case-id 291 --api-base http://127.0.0.1:4196/api --output <temp>\case-291-m5n.spec.js` + `node --check <temp>\case-291-m5n.spec.js` | 通过，多窗口增强 Playwright spec 可生成并通过语法检查 | `%TEMP%\cuecast-export-m5n\case-291-m5n.spec.js` |
-| 2026-07-06 | `node playwright-runner/src/export-pytest.js --case-id 291 --api-base http://127.0.0.1:4196/api --output <temp>\test_case_291_m5n.py` + `python -m py_compile <temp>\test_case_291_m5n.py` | 通过，多窗口增强 pytest 文件可生成并通过 Python 编译检查 | `%TEMP%\cuecast-export-m5n\test_case_291_m5n.py` |
-| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283,284,285,286,287,288,289,290,291 --api-base http://127.0.0.1:4197/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M5-N 后批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-184430/` |
-| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283,284,285,286,287,288,289,290,291 --api-base http://127.0.0.1:4198/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，收口复验 13 个 mock case 全部 passed | `playwright-runner-artifacts/batches/batch-20260706-203704/` |
-| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 292,293,294,295,296 --api-base http://127.0.0.1:4199/api --workers 1 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M5-O 五类专项新增 case 全部 passed | `playwright-runner-artifacts/batches/batch-20260706-212433/` |
-| 2026-07-06 | `node playwright-runner/src/index.js --case-id 296 --api-base http://127.0.0.1:4205/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，导出 smoke case 的 Runner 单跑通过 | `playwright-runner-artifacts/runs/296-20260706-213816/` |
-| 2026-07-06 | `node playwright-runner/src/export-playwright.js --case-id 296 --api-base http://127.0.0.1:4205/api --output playwright-runner/tests/case-296-m5o-e2e.spec.js` + `node --check ...` + `npm --prefix playwright-runner exec playwright test case-296-m5o-e2e.spec.js --config playwright.config.js` | 通过，导出 Playwright spec 在标准 Playwright Test 项目内端到端执行 passed | `playwright-runner/tests/case-296-m5o-e2e.spec.js` |
-| 2026-07-06 | `node playwright-runner/src/export-pytest.js --case-id 296 --api-base http://127.0.0.1:4206/api --output playwright-runner-artifacts/exports/test_case_296_m5o_e2e.py` + `python -m py_compile ...` | 通过，pytest 导出 smoke 文件可编译 | `playwright-runner-artifacts/exports/test_case_296_m5o_e2e.py` |
-| 2026-07-06 | `node playwright-runner/src/batch.js --case-ids 278,279,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296 --api-base http://127.0.0.1:4206/api --workers 2 --artifact-dir D:\King\sakura-playwright\playwright-runner-artifacts` | 通过，M5-O 后 18 个 mock 成功集合全部 passed | `playwright-runner-artifacts/batches/batch-20260706-214030/` |
-| 2026-07-06 | `node playwright-runner/src/export-playwright.js --case-id 296 --api-base http://127.0.0.1:4207/api --storage-state test-lab/storage-states/m5o-storage-state.json --output playwright-runner/tests/case-296-m5o-storage.spec.js` + `node --check ...` + `npm --prefix playwright-runner exec playwright test case-296-m5o-storage.spec.js --config playwright.config.js` | 通过，Playwright 导出支持 storage state 并端到端执行 passed；导出文件包含 `CUECAST_START_URL`、`CUECAST_API_BASE`、`CUECAST_STORAGE_STATE` 参数入口 | `playwright-runner/tests/case-296-m5o-storage.spec.js` |
-| 2026-07-06 | `node playwright-runner/src/export-pytest.js --case-id 296 --api-base http://127.0.0.1:4207/api --storage-state test-lab/storage-states/m5o-storage-state.json --output playwright-runner-artifacts/exports/test_case_296_m5o_storage.py` + `python -m py_compile ...` | 通过，pytest 导出支持 browser context storage state 和环境参数化并可编译 | `playwright-runner-artifacts/exports/test_case_296_m5o_storage.py` |
+| 2026-07-06 | `node src/batch.js --case-ids 278,279,281,282,283 --api-base http://127.0.0.1:4181/api --workers 2 --artifact-dir D:\King\sakura\sakura-playwright-artifacts` | 通过，M5-E 后批量回归仍全部 passed | `playwright-runner-artifacts/batches/batch-20260706-113640/` |
+| 2026-07-06 | `node src/index.js --case-id 284 --api-base http://127.0.0.1:4182/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖请求 URL、method、body 断言 | `playwright-runner-artifacts/runs/284-20260706-115223/` |
+| 2026-07-06 | `node src/index.js --case-id 279 --api-base http://127.0.0.1:4182/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，验证自定义 select 长页面回归修复 | `playwright-runner-artifacts/runs/279-20260706-115614/` |
+| 2026-07-06 | `node src/batch.js --case-ids 278,279,281,282,283,284 --api-base http://127.0.0.1:4182/api --workers 2 --artifact-dir D:\King\sakura\sakura-playwright-artifacts` | 通过，M5-F 后批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-115636/` |
+| 2026-07-06 | `node src/index.js --case-id 285 --api-base http://127.0.0.1:4183/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖延迟 mock 和请求数量断言 | `playwright-runner-artifacts/runs/285-20260706-150446/` |
+| 2026-07-06 | `node src/batch.js --case-ids 278,279,281,282,283,284,285 --api-base http://127.0.0.1:4183/api --workers 2 --artifact-dir D:\King\sakura\sakura-playwright-artifacts` | 通过，M5-G 后批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-150618/` |
+| 2026-07-06 | `node src/index.js --case-id 286 --api-base http://127.0.0.1:4184/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖响应 JSON 断言和 abort 失败注入专项验证 | `playwright-runner-artifacts/runs/286-20260706-151419/` |
+| 2026-07-06 | `node src/batch.js --case-ids 278,279,281,282,283,284,285,286 --api-base http://127.0.0.1:4184/api --workers 2 --artifact-dir D:\King\sakura\sakura-playwright-artifacts` | 通过，M5-H 后批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-151442/` |
+| 2026-07-06 | `node src/index.js --case-id 287 --api-base http://127.0.0.1:4185/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖响应快照文件化和页面渲染断言 | `playwright-runner-artifacts/runs/287-20260706-153416/` |
+| 2026-07-06 | `node src/batch.js --case-ids 278,279,281,282,283,284,285,286,287 --api-base http://127.0.0.1:4185/api --workers 2 --artifact-dir D:\King\sakura\sakura-playwright-artifacts` | 通过，M5-I 后批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-153501/` |
+| 2026-07-06 | `node src/index.js --case-id 288 --api-base http://127.0.0.1:4186/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖响应基线对比、快照和页面渲染断言 | `playwright-runner-artifacts/runs/288-20260706-155300/` |
+| 2026-07-06 | `node src/batch.js --case-ids 278,279,281,282,283,284,285,286,287,288 --api-base http://127.0.0.1:4186/api --workers 2 --artifact-dir D:\King\sakura\sakura-playwright-artifacts` | 通过，M5-J 后批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-155505/` |
+| 2026-07-06 | `node src/index.js --case-id 289 --api-base http://127.0.0.1:4187/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖类 HAR 回放、页面渲染断言和请求数量断言 | `playwright-runner-artifacts/runs/289-20260706-161227/` |
+| 2026-07-06 | `node src/batch.js --case-ids 278,279,281,282,283,284,285,286,287,288,289 --api-base http://127.0.0.1:4187/api --workers 2 --artifact-dir D:\King\sakura\sakura-playwright-artifacts` | 通过，M5-K 后批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-161316/` |
+| 2026-07-06 | `node src/index.js --case-id 290 --api-base http://127.0.0.1:4192/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖多文件上传、下载 MIME、大小、内容和 SHA256 校验 | `playwright-runner-artifacts/runs/290-20260706-175200/` |
+| 2026-07-06 | `node src/batch.js --case-ids 278,279,281,282,283,284,285,286,287,288,289,290 --api-base http://127.0.0.1:4194/api --workers 2 --artifact-dir D:\King\sakura\sakura-playwright-artifacts` | 通过，M5-L 后批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-175358/` |
+| 2026-07-06 | `npm run check` | 通过，M5-M 导出器源码语法检查通过 | 无 |
+| 2026-07-06 | `node src/export-playwright.js --case-id 281/283/284/285/286/287/288/289/290 --api-base http://127.0.0.1:4197/api --output <temp>\case-*-m5m.spec.js` + `node --check <temp>\case-*-m5m.spec.js` | 通过，高级动作 Playwright spec 均可生成并通过语法检查 | `%TEMP%\cuecast-export-m5m-2\` |
+| 2026-07-06 | `node src/export-pytest.js --case-id 281/283/284/285/286/287/288/289/290 --api-base http://127.0.0.1:4197/api --output <temp>\test_case_*_m5m.py` + `python -m py_compile <temp>\test_case_*_m5m.py` | 通过，高级动作 pytest 文件均可生成并通过 Python 编译检查 | `%TEMP%\cuecast-export-m5m-2\` |
+| 2026-07-06 | `npm run check` | 通过，M5-N Runner 和导出器源码语法检查通过 | 无 |
+| 2026-07-06 | `node --check ../sakura-cuecast/test-lab/mock-server.js` | 通过，case 291 seed 语法检查通过 | 无 |
+| 2026-07-06 | `node src/index.js --case-id 291 --api-base http://127.0.0.1:4195/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，覆盖打开 popup、显式切回主页面、按 URL 切回 popup、关闭 popup 并回主页面 | `playwright-runner-artifacts/runs/291-20260706-184309/` |
+| 2026-07-06 | `node src/export-playwright.js --case-id 291 --api-base http://127.0.0.1:4196/api --output <temp>\case-291-m5n.spec.js` + `node --check <temp>\case-291-m5n.spec.js` | 通过，多窗口增强 Playwright spec 可生成并通过语法检查 | `%TEMP%\cuecast-export-m5n\case-291-m5n.spec.js` |
+| 2026-07-06 | `node src/export-pytest.js --case-id 291 --api-base http://127.0.0.1:4196/api --output <temp>\test_case_291_m5n.py` + `python -m py_compile <temp>\test_case_291_m5n.py` | 通过，多窗口增强 pytest 文件可生成并通过 Python 编译检查 | `%TEMP%\cuecast-export-m5n\test_case_291_m5n.py` |
+| 2026-07-06 | `node src/batch.js --case-ids 278,279,281,282,283,284,285,286,287,288,289,290,291 --api-base http://127.0.0.1:4197/api --workers 2 --artifact-dir D:\King\sakura\sakura-playwright-artifacts` | 通过，M5-N 后批量回归全部 passed | `playwright-runner-artifacts/batches/batch-20260706-184430/` |
+| 2026-07-06 | `node src/batch.js --case-ids 278,279,281,282,283,284,285,286,287,288,289,290,291 --api-base http://127.0.0.1:4198/api --workers 2 --artifact-dir D:\King\sakura\sakura-playwright-artifacts` | 通过，收口复验 13 个 mock case 全部 passed | `playwright-runner-artifacts/batches/batch-20260706-203704/` |
+| 2026-07-06 | `node src/batch.js --case-ids 292,293,294,295,296 --api-base http://127.0.0.1:4199/api --workers 1 --artifact-dir D:\King\sakura\sakura-playwright-artifacts` | 通过，M5-O 五类专项新增 case 全部 passed | `playwright-runner-artifacts/batches/batch-20260706-212433/` |
+| 2026-07-06 | `node src/index.js --case-id 296 --api-base http://127.0.0.1:4205/api --headed false --trace retain-on-failure --video retain-on-failure` | 通过，导出 smoke case 的 Runner 单跑通过 | `playwright-runner-artifacts/runs/296-20260706-213816/` |
+| 2026-07-06 | `node src/export-playwright.js --case-id 296 --api-base http://127.0.0.1:4205/api --output tests/case-296-m5o-e2e.spec.js` + `node --check ...` + `npm exec -- playwright test case-296-m5o-e2e.spec.js --config playwright.config.js` | 通过，导出 Playwright spec 在标准 Playwright Test 项目内端到端执行 passed | `tests/case-296-m5o-e2e.spec.js` |
+| 2026-07-06 | `node src/export-pytest.js --case-id 296 --api-base http://127.0.0.1:4206/api --output playwright-runner-artifacts/exports/test_case_296_m5o_e2e.py` + `python -m py_compile ...` | 通过，pytest 导出 smoke 文件可编译 | `playwright-runner-artifacts/exports/test_case_296_m5o_e2e.py` |
+| 2026-07-06 | `node src/batch.js --case-ids 278,279,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296 --api-base http://127.0.0.1:4206/api --workers 2 --artifact-dir D:\King\sakura\sakura-playwright-artifacts` | 通过，M5-O 后 18 个 mock 成功集合全部 passed | `playwright-runner-artifacts/batches/batch-20260706-214030/` |
+| 2026-07-06 | `node src/export-playwright.js --case-id 296 --api-base http://127.0.0.1:4207/api --storage-state ../sakura-cuecast/test-lab/storage-states/m5o-storage-state.json --output tests/case-296-m5o-storage.spec.js` + `node --check ...` + `npm exec -- playwright test case-296-m5o-storage.spec.js --config playwright.config.js` | 通过，Playwright 导出支持 storage state 并端到端执行 passed；导出文件包含 `CUECAST_START_URL`、`CUECAST_API_BASE`、`CUECAST_STORAGE_STATE` 参数入口 | `tests/case-296-m5o-storage.spec.js` |
+| 2026-07-06 | `node src/export-pytest.js --case-id 296 --api-base http://127.0.0.1:4207/api --storage-state ../sakura-cuecast/test-lab/storage-states/m5o-storage-state.json --output playwright-runner-artifacts/exports/test_case_296_m5o_storage.py` + `python -m py_compile ...` | 通过，pytest 导出支持 browser context storage state 和环境参数化并可编译 | `playwright-runner-artifacts/exports/test_case_296_m5o_storage.py` |
 
 ### 验收记录
 
@@ -439,9 +485,9 @@ M5 是持续迭代阶段，本轮先实现可本地验证、可保留 mock 用�
 | 高级动作 pytest 导出可生成 | 通过 | case 281、283、284、285、286、287、288、289、290 覆盖同一批高级动作并通过 `py_compile` |
 | 多窗口增强 Playwright 导出可生成 | 通过 | case 291 覆盖 `switch_page` 和 `close_page` 导出并通过 `node --check` |
 | 多窗口增强 pytest 导出可生成 | 通过 | case 291 覆盖 `switch_page` 和 `close_page` 导出并通过 `python -m py_compile` |
-| 导出 Playwright spec 端到端可执行 | 通过 | case 296 导出到 `playwright-runner/tests/case-296-m5o-e2e.spec.js` 后通过 `npm --prefix playwright-runner exec playwright test` |
+| 导出 Playwright spec 端到端可执行 | 通过 | case 296 导出到 `tests/case-296-m5o-e2e.spec.js` 后通过 `npm exec -- playwright test` |
 | 专项 pytest 导出可编译 | 通过 | case 296 导出 pytest 文件后通过 `python -m py_compile` |
-| Playwright 导出 storage state 可执行 | 通过 | case 296 使用 `--storage-state test-lab/storage-states/m5o-storage-state.json` 导出后端到端 passed |
+| Playwright 导出 storage state 可执行 | 通过 | case 296 使用 `--storage-state ../sakura-cuecast/test-lab/storage-states/m5o-storage-state.json` 导出后端到端 passed |
 | Playwright/pytest 导出环境参数化可生成 | 通过 | 导出文件包含 `CUECAST_START_URL`、`CUECAST_API_BASE` 和 `CUECAST_STORAGE_STATE` 参数入口 |
 | 前序通过集合未回归 | 通过 | 批量执行 `278,279,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296` 全部 passed |
 
@@ -459,3 +505,34 @@ M5 是持续迭代阶段，本轮先实现可本地验证、可保留 mock 用�
 结论：`部分通过`。
 
 M5-A 至 M5-O 十五批高级能力已完成并通过本地 mock 验收；完整 M5 仍需继续按真实业务和更复杂组件专项推进。
+
+## M6：admin 平台单用例 Runner 入口
+
+| 项目 | 状态 | 说明 |
+| --- | --- | --- |
+| admin Runner Job 创建/查询/取消 API | 已实现 | admin 异步启动 `src/index.js`，受权限保护并限制并发数 |
+| admin-ui Runner 回放入口 | 已实现 | 场景编辑页选择用例后点击“Playwright Runner 回放”，轮询任务并刷新执行历史 |
+| admin 认证结果回传 | 已实现 | 后台将当前登录用户 Bearer Token 注入 Runner，Runner 读取和回传均走 admin API |
+| 用例/步骤结果展示 | 已实现 | Runner `raw.steps`、扩展 `case_result.steps` 均写入 admin 执行记录 |
+
+### M6 环境要求
+
+- admin 服务所在节点安装 Node.js 和 Playwright 浏览器依赖。
+- 配置 `SAKURA_PLAYWRIGHT_RUNNER_ROOT` 指向 `sakura-playwright` 仓库根目录。
+- 在 `.env` 配置 `CUECAST_API_BASE`、`CUECAST_ADMIN_API=true` 和回放运行参数。
+- 当前 M6 支持单用例回放；原有 Jenkins 场景/计划执行链路保持不变。
+
+### M6 回放失败定位补充（2026-07-15）
+
+- 修复 admin 从不同 `user.dir` 启动时 Runner 相对目录解析错误；默认会探测工作区根目录、模块目录及其上级目录，并校验 `src/index.js`。
+- 平台入口默认使用 `headed=false`，避免后台服务或 Jenkins 节点没有桌面会话导致浏览器启动失败。
+- 页面展示 Runner 最近输出，包含实际 `runnerRoot`、`runnerConfig`、启动参数和 Node/Playwright/API 错误；执行失败时结果回传失败也会标记为失败。
+- Runner 产物目录按 `runs/<projectShortName>/<versionName>/<sceneId>/<caseId>/<yyyyMMdd>/<HHmmss>/` 分层保存，业务元数据来自 admin 用例执行快照；业务 `sceneId:caseId` 同时用于任务展示、runId 和 admin API 读写。
+- Runner 弹窗配置名称已改为中文，底部按 Jenkins 模板展示场景 ID、场景名称、执行状态、上次结果、运行耗时和构建号；Jenkins 组件与执行链路未改动。
+- CDP/Runner 生成、admin 任务状态和 `debugRecord/playwrightResult` 顶层及嵌套执行时间已统一为北京时间 `yyyy-MM-dd HH:mm:ss`；旧 UTC ISO 时间由后端在入库前递归兼容转换。
+- Runner 读取用例和回传结果使用 `/testcases/{sceneKey}/{caseId}` 双路径兼容入口，避免 `%3A` 编码导致 Spring 路由 404。
+- Runner 的 `CUECAST_API_BASE` 使用 Spring 后端直连地址，不附加前端开发代理使用的 `/api` 前缀；该地址和浏览器、无头模式、产物、trace/video、HTTPS 证书策略均由 `.env` 统一提供。
+- 内部自签名 HTTPS 测试站点可在 Runner `.env` 设置 `RUNNER_IGNORE_HTTPS_ERRORS=true`；公网生产环境应保持为 `false` 并修复证书链。
+- admin 后端代码变更后必须重启后端；若 `/api/automation/playwright/runner/jobs` 返回 `404`，说明当前进程仍是旧版本。
+
+验证：`mvn -pl continew-automation -am -DskipTests compile`、`npm run typecheck`、`npm run build`、`npm run check` 均通过。

@@ -1,4 +1,6 @@
+node_modules/
+.env
+artifacts/
+playwright-runner-artifacts/
 playwright-runner-artifacts1/
 playwright-runner-artifacts2/
-playwright-runner/.env
-playwright-runner/artifacts
