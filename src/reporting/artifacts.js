@@ -2,10 +2,10 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { timestampForPath } from '../shared/utils.js';
 
-export async function createRunArtifacts({ artifactDir, caseId, testCase, timestamp = timestampForPath() }) {
+export async function createRunArtifacts({ artifactDir, caseId, testCase, runId: requestedRunId, timestamp = timestampForPath() }) {
   // runId 继续使用原始 caseKey，保证 admin artifact 上传和执行记录关联方式不变。
   const safeCaseKey = toSafePathPart(caseId);
-  const runId = `${safeCaseKey}-${timestamp}`;
+  const runId = String(requestedRunId || '').trim() || `${safeCaseKey}-${timestamp}`;
   const [runDate = 'unknown-date', runTime = 'unknown-time'] = String(timestamp).split('-', 2);
   const pathMetadata = resolveRunPathMetadata(testCase, caseId);
   const runDir = path.resolve(

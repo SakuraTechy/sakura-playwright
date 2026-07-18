@@ -10,6 +10,8 @@ import { formatPlatformDateTime, parseArgs, timestampForPath, withTimeout } from
 test('platform CLI options override runner environment defaults', () => {
   const config = parseArgs([
     '--case-id', '100:CASE_001',
+    '--batch-id', 'BATCH-20260717-0001',
+    '--run-id', 'RUN-20260717-0001',
     '--project-environment-id', '47',
     '--headed', 'true',
     '--ignore-https-errors', 'false',
@@ -22,6 +24,8 @@ test('platform CLI options override runner environment defaults', () => {
   });
 
   assert.equal(config.projectEnvironmentId, '47');
+  assert.equal(config.batchId, 'BATCH-20260717-0001');
+  assert.equal(config.runId, 'RUN-20260717-0001');
   assert.equal(config.headed, true);
   assert.equal(config.ignoreHttpsErrors, false);
   assert.equal(config.trace, 'on');
@@ -93,6 +97,7 @@ test('run artifacts use project version scene case date and time hierarchy', asy
     const artifacts = await createRunArtifacts({
       artifactDir,
       caseId: 'AAS_P_SMOKE_006:SCENE_CASE_001',
+      runId: 'RUN-20260717-0001',
       timestamp: '20260715-180409',
       testCase: {
         project_short_name: 'AAS_P',
@@ -106,7 +111,7 @@ test('run artifacts use project version scene case date and time hierarchy', asy
       artifacts.runDir,
       path.join(artifactDir, 'runs', 'AAS_P', 'V6.5B06D011', 'AAS_P_SMOKE_006', 'SCENE_CASE_001', '20260715', '180409'),
     );
-    assert.equal(artifacts.runId, 'AAS_P_SMOKE_006_SCENE_CASE_001-20260715-180409');
+    assert.equal(artifacts.runId, 'RUN-20260717-0001');
   } finally {
     await fs.rm(artifactDir, { recursive: true, force: true });
   }

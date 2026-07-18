@@ -3,6 +3,7 @@ import { durationMs, formatPlatformDateTime, serializeError } from '../shared/ut
 export function createRunResult({ config, artifacts, startedAt }) {
   const result = {
     case_id: Number(config.caseId) || config.caseId,
+    batch_id: config.batchId || '',
     run_id: artifacts.runId,
     executor: 'playwright-runner',
     status: 'running',
@@ -66,6 +67,7 @@ export function markStepFailed(result, step, error, startedAt) {
     error_code: serialized.code,
     locator_source: serialized.details?.source || serialized.details?.locator_source || '',
     locator_type: serialized.details?.locatorType || serialized.details?.locator_type || '',
+    locator_value: serialized.details?.locatorValue || serialized.details?.locator_value || '',
     details: serialized.details,
   });
   return serialized;

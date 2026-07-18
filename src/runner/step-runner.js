@@ -148,6 +148,7 @@ export async function runStep(page, testCase, step, options = {}) {
     duration_ms: Date.now() - startedAt,
     locator_source: locatorInfo?.source || '',
     locator_type: locatorInfo?.locatorType || '',
+    locator_value: locatorInfo?.locatorValue || '',
     matched_count: locatorInfo?.matchedCount ?? null,
     visible_count: locatorInfo?.visibleCount ?? null,
     ...extra,

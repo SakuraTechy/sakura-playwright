@@ -58,6 +58,7 @@ async function main() {
     artifacts = await createRunArtifacts({
       artifactDir: config.artifactDir,
       caseId: config.caseId,
+      runId: config.runId,
       testCase,
     });
     result = createRunResult({ config, artifacts, startedAt });
@@ -146,7 +147,11 @@ async function main() {
       },
     });
   } catch (error) {
-    artifacts ||= await createRunArtifacts({ artifactDir: config.artifactDir, caseId: config.caseId });
+    artifacts ||= await createRunArtifacts({
+      artifactDir: config.artifactDir,
+      caseId: config.caseId,
+      runId: config.runId,
+    });
     result ||= createRunResult({ config, artifacts, startedAt });
     markRunFailed(result, error);
     await collectFailureArtifacts(activePage || page, artifacts, result);

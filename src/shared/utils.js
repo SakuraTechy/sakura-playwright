@@ -21,6 +21,8 @@ export function parseArgs(argv = process.argv.slice(2), env = process.env) {
 
   const config = {
     caseId: args['case-id'] || mergedEnv.CUECAST_CASE_ID || '',
+    batchId: args['batch-id'] || mergedEnv.CUECAST_BATCH_ID || '',
+    runId: args['run-id'] || mergedEnv.CUECAST_RUN_ID || '',
     projectEnvironmentId: args['project-environment-id'] || mergedEnv.CUECAST_PROJECT_ENVIRONMENT_ID || '',
     apiBase: trimTrailingSlash(args['api-base'] || mergedEnv.CUECAST_API_BASE || 'http://127.0.0.1:4173/api'),
     // 平台任务未传 API 地址时使用 .env 的 admin 协议；旧 test-lab 命令显式传入 mock API 时保持原协议。
