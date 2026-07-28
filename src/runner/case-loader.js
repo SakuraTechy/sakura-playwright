@@ -21,6 +21,7 @@ export function normalizeSteps(rawSteps, startStep = 0) {
   const steps = (Array.isArray(rawSteps) ? rawSteps : [])
     .map((step, index) => ({
       id: step.id ?? index + 1,
+      original_step_id: step.original_step_id ?? null,
       step_index: Number.isInteger(Number(step.step_index)) ? Number(step.step_index) : index,
       action_type: String(step.action_type || 'click').trim().toLowerCase(),
       target_selector: step.target_selector ?? '',
@@ -35,7 +36,36 @@ export function normalizeSteps(rawSteps, startStep = 0) {
     }))
     .sort((a, b) => a.step_index - b.step_index);
 
-  return steps.filter((_, index) => index >= startStep);
+  return ensureUniqueStepIds(steps).filter((_, index) => index >= startStep);
+}
+
+function ensureUniqueStepIds(steps) {
+  const usedIds = new Set();
+  return steps.map((step) => {
+    const key = stepIdKey(step.id);
+    if (!usedIds.has(key)) {
+      usedIds.add(key);
+      return step;
+    }
+
+    let suffix = String(step.step_index);
+    let uniqueId = `${String(step.id)}__${suffix}`;
+    while (usedIds.has(stepIdKey(uniqueId))) {
+      suffix = `${suffix}_duplicate`;
+      uniqueId = `${String(step.id)}__${suffix}`;
+    }
+    usedIds.add(stepIdKey(uniqueId));
+    return {
+      ...step,
+      id: uniqueId,
+      // 异常旧数据仍保留录制 ID，执行结果使用唯一 ID，避免报告和前端行键覆盖。
+      original_step_id: step.original_step_id ?? step.id,
+    };
+  });
+}
+
+function stepIdKey(value) {
+  return String(value);
 }
 
 export function resolveViewport(testCase, options = {}) {

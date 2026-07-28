@@ -30,6 +30,109 @@
 | M4 | CI 和批量执行 | 通过 | 批量入口、mock 批量 job API、CI 模板已实现并通过本地 mock 验收 |
 | M5 | 高级能力 | 部分通过 | M5-A 至 M5-O 已完成 iframe、文件上传、多文件上传、隐藏上传代理、下载断言、高级下载校验、二进制下载校验、JSON/API、Monaco 输入、Monaco 快捷键、树定位、展开/复选树、多窗口基础切换、多窗口显式切换和关闭、多 popup 选择、网络 mock、类 HAR 回放、请求断言、响应断言、响应快照、快照基线对比、请求数量断言、失败注入专项 case、Playwright/pytest 脚本导出、复杂定位导出、高级动作导出和导出 Playwright 端到端执行并通过 mock 验收 |
 
+## 2026-07-24：批次认证状态复用与取消联动
+
+### 完成情况
+
+| 事项 | 结果 |
+| --- | --- |
+| 会话模式 | 新增 `isolated` 与 `reuse-auth`；旧命令默认保持隔离 |
+| 状态范围 | 成功用例提交 Cookie、localStorage 和 IndexedDB；失败、取消、强杀不提交候选状态 |
+| 串行约束 | `reuse-auth` 仅允许带批次标识的串行执行，`workers > 1` 明确报错 |
+| 取消联动 | 批次取消终止活动 Node 进程并清理当前状态和候选状态；迟到结果不能覆盖 `cancelled` |
+| 安全边界 | 状态路径由 admin 后端生成，命令日志脱敏，不写入 artifact、场景 JSON 或前端请求 |
+
+### 验证
+
+- `npm run check`：通过。
+- `npm run test:unit`：通过。
+- `npm run test:session`：通过；同一夹具下 `isolated` 的第二条受保护用例失败，`reuse-auth` 成功复用 Cookie、localStorage 和 IndexedDB。
+
+## 2026-07-24：Element Select 回放与结果关联修复
+
+### 完成情况
+
+| 事项 | 结果 |
+| --- | --- |
+| Element/Ant Select 搜索语义 | Runner 识别“点击打开 → input 搜索词 → overlay 选项点击”的连续录制步骤；搜索输入只填充内部文本框，不再提前选择并关闭下拉层 |
+| overlay 定位语义 | `semantic-v1` 补齐 CueCast/CDP 的 `is_overlay`、`normalize-space()` 和无 selector 值步骤识别；期望 overlay 时不回退到页面表格中的同名文本 |
+| 步骤结果关联 | admin 回填优先使用唯一 `step_index`，重复 `step_id` 改为队列兜底；Runner 使用唯一执行 ID 并保留 `original_step_id`，避免结果覆盖或错位 |
+
+### 验证
+
+- `npm run check`：通过。
+- `npm run test:unit`：通过，24 项；`npm run test:locator`：通过，9 项，新增 Element Select 搜索—选项回放和重复步骤 ID 回归用例。
+- admin reactor 编译和定向测试通过；`AutomationPlaywrightStepExtractorTest` 验证管理端唯一步骤 ID 与录制原始 ID 分离，`AutomationPlaywrightCaseServiceImplTest` 验证重复录制 ID 按执行序号正确关联。
+
+### 录制追加与替换的影响
+
+| 操作 | 对原数据的影响 |
+| --- | --- |
+| `appendCase` | 保留原用例内容，但插入后会重排全部用例 ID、顺序及子步骤 `pid`；依赖旧用例 ID 的外部引用需要同步 |
+| `appendStep` | 保留目标用例原步骤内容，但插入后会重排该用例全部步骤 ID；原始 `playwright_step` 不改写 |
+| `replaceCase` | 仅替换目标用例全部内容和步骤，同时保留目标用例身份；其他用例不变 |
+| `replaceCaseSteps` | 仅替换目标用例的完整步骤列表；原步骤不再保留在当前版本中，其他用例不变 |
+| `replaceStep` | 仅删除并替换目标步骤，其他步骤内容保留；随后会重排该用例全部步骤 ID |
+
+### 边界
+
+- 只改变 Runner 对连续录制步骤的还原和 admin 结果关联，不改变 legacy 定位模式和 CDP 执行链路。
+- 远程搜索、多选和虚拟列表仍需结合对应组件录制样本继续验收。
+
+## 2026-07-19：录制定位语义对齐
+
+### 完成情况
+
+| 事项 | 结果 |
+| --- | --- |
+| 双模式兼容 | 新增 `semantic-v1`，admin Runner Job 固定启用；手工 CLI/Jenkins 默认保持 `legacy`，不改变历史入口行为 |
+| 录制候选 | 支持 CueCast 当前全部候选类型，并结合 control、label、container、sibling、table、rect 和 state class 上下文评分 |
+| 高置信收敛 | 仅最高分和领先分差同时达标时自动选择；低置信多匹配返回 `LOCATOR_AMBIGUOUS` |
+| 可交互代理 | 隐藏 checkbox/radio 转到 label 或组件包装器，SVG 转到可交互祖先，combobox 转到可见内部控件 |
+| 等待与页面错误 | loading 期间暂停逻辑超时并保留 180 秒墙钟上限；页面错误检测支持用例继承和任务级 `true/false` 覆盖 |
+| 诊断结果 | 步骤结果写入候选尝试、匹配数、评分、归一化、等待和资源失败，并区分未找到、歧义、隐藏、禁用、遮挡和查找异常 |
+
+### 验证
+
+- `npm run check`：通过。
+- `npm run test:unit`：通过，共 20 项。
+- `npm run test:locator`：通过，共 8 项，覆盖代理转换、上下文收敛、歧义、延迟出现、loading 暂停、页面错误、遮挡分类和后续等待错误保真。
+- Mock case `297` 以 `--locator-mode semantic-v1` 执行通过；隐藏原生 checkbox 被转换为可见 `label`，诊断记录 `normalization_rule: checkbox-visible-wrapper`、最高分 `255`。
+- `AutomationPlaywrightRunnerJobServiceImplTest`：通过，共 2 项，确认 admin 固定传 `semantic-v1`、显式 `false` 不丢失、继承模式不传覆盖参数。
+- `pnpm typecheck`、`pnpm build`（`sakura-admin-ui`）：通过；构建仅保留现有 Sass `@import` 弃用告警。
+
+### 边界
+
+- `semantic-v1` 对齐的是 CueCast 录制步骤语义和失败分类，不复用 Chrome 扩展的 `chrome.debugger` 生命周期、当前 Chrome 登录态或扩展 UI。
+- 真实 admin 录制场景、产品环境结果回写和失败 artifact 展示仍需现场验收。
+
+## 2026-07-19：实时画面动作可视化
+
+### 完成情况
+
+| 事项 | 结果 |
+| --- | --- |
+| 虚拟鼠标 | Runner 发送实际目标坐标，admin-ui 使用录屏同款透明 PNG 橙色鼠标独立覆盖显示，放大期间保持固定尺寸 |
+| 聚焦放大 | 根据目标控件中心平滑放大完整原始帧约 1.75 倍；靠近边缘时自动限制位移，避免出现黑边 |
+| 动作提示 | 实时画面底部显示步骤序号和 admin 用例步骤名称，目标元素显示半透明橙色高亮，点击波纹仅播放一次 |
+| 页面兼容 | 可视化使用不接收指针事件的 Canvas，不写入可检索文本，不影响页面交互、文本断言或后续定位 |
+| 短动作抓帧 | 定时截图之外增加动作前立即抓帧，避免步骤在两个截图周期之间完成而无法显示 |
+| 原始画质 | 聚焦坐标和动画信息写入 JPEG 注释段，前端缩放完整帧，不裁剪或降低 4K/8K 原始分辨率 |
+| 展示节奏 | admin 实时任务每步至少保留约 500ms；前端按画质使用 500ms 至 1000ms 拉取间隔 |
+
+### 验证
+
+- `npm run check`：通过。
+- `npm run test:unit`：通过，共 15 项；覆盖动作前强制新帧、目标聚焦坐标、一次性波纹和 JPEG 聚焦信息。
+- `pnpm typecheck`、`pnpm build`（`sakura-admin-ui`）：通过；构建仅保留现有 Sass `@import`、字体运行时解析和大分块告警。
+- `录屏_20260719_030814.mp4` 以每秒 6 帧抽取过渡区间，确认参考效果约在 560ms 内由全景放大至目标区域，波纹仅短暂出现。
+- 当前应用内浏览器未提供可用实例，完整组件动画的浏览器视觉对比待本地运行任务复验。
+
+### 边界
+
+- 当前实时通道仍传输 JPEG 动作帧，不是 20 FPS 视频流；效果为按真实步骤位置更新的操作回放，不会采集操作系统鼠标。
+- iframe 内目标由所在 frame 自己绘制覆盖层，跨域 frame 不需要读取父页面 DOM。
+
 ## 2026-07-15：工程目录重构
 
 ### 完成情况
@@ -514,6 +617,9 @@ M5-A 至 M5-O 十五批高级能力已完成并通过本地 mock 验收；完整
 | admin-ui Runner 回放入口 | 已实现 | 场景编辑页选择用例后点击“Playwright Runner 回放”，轮询任务并刷新执行历史 |
 | admin 认证结果回传 | 已实现 | 后台将当前登录用户 Bearer Token 注入 Runner，Runner 读取和回传均走 admin API |
 | 用例/步骤结果展示 | 已实现 | Runner `raw.steps`、扩展 `case_result.steps` 均写入 admin 执行记录 |
+| 结构化实时日志 | 已实现 | Runner stdout 发送带时间、级别、阶段和详略标记的事件，admin-ui 支持简洁/详细切换和自动跟随 |
+| Runner 实时画面 | 已实现 | Runner 每秒上传最新 JPEG，admin-ui 轮询 Job 内存中的最新帧；终态短暂保留最后一帧且不进入 `caseList/debugRecord` |
+| 历史日志 artifact | 已实现 | 执行完成后上传 `execution-log.json`，服务重启后仍可回看 |
 
 ### M6 环境要求
 
@@ -527,7 +633,7 @@ M5-A 至 M5-O 十五批高级能力已完成并通过本地 mock 验收；完整
 - 修复 admin 从不同 `user.dir` 启动时 Runner 相对目录解析错误；默认会探测工作区根目录、模块目录及其上级目录，并校验 `src/index.js`。
 - 平台入口默认使用 `headed=false`，避免后台服务或 Jenkins 节点没有桌面会话导致浏览器启动失败。
 - 页面展示 Runner 最近输出，包含实际 `runnerRoot`、`runnerConfig`、启动参数和 Node/Playwright/API 错误；执行失败时结果回传失败也会标记为失败。
-- Runner 产物目录按 `runs/<projectShortName>/<versionName>/<sceneId>/<caseId>/<yyyyMMdd>/<HHmmss>/` 分层保存，业务元数据来自 admin 用例执行快照；业务 `sceneId:caseId` 同时用于任务展示、runId 和 admin API 读写。
+- admin Runner 产物目录按 `runs/<projectShortName>/<versionName>/<sceneId>/<caseId>/<yyyyMMdd>/<executionId>/` 分层保存，末级目录与执行历史的用例执行 ID 一致；未传 `--run-id` 的旧 CLI 仍使用 `HHmmss`。
 - Runner 弹窗配置名称已改为中文，底部按 Jenkins 模板展示场景 ID、场景名称、执行状态、上次结果、运行耗时和构建号；Jenkins 组件与执行链路未改动。
 - CDP/Runner 生成、admin 任务状态和 `debugRecord/playwrightResult` 顶层及嵌套执行时间已统一为北京时间 `yyyy-MM-dd HH:mm:ss`；旧 UTC ISO 时间由后端在入库前递归兼容转换。
 - Runner 读取用例和回传结果使用 `/testcases/{sceneKey}/{caseId}` 双路径兼容入口，避免 `%3A` 编码导致 Spring 路由 404。
@@ -536,3 +642,19 @@ M5-A 至 M5-O 十五批高级能力已完成并通过本地 mock 验收；完整
 - admin 后端代码变更后必须重启后端；若 `/api/automation/playwright/runner/jobs` 返回 `404`，说明当前进程仍是旧版本。
 
 验证：`mvn -pl continew-automation -am -DskipTests compile`、`npm run typecheck`、`npm run build`、`npm run check` 均通过。
+
+### M6 执行日志与实时画面补充（2026-07-18）
+
+- admin Job API 保留原 `outputTail`，新增最多 500 条结构化日志；批次详细结果合并时保留 `job_id`。
+- 步骤日志按一基序号展示，并优先使用 admin `StepDO.name`；原始 `playwright_step` 仅在响应层补齐缺失的序号和名称，不回写存储数据。
+- 实时帧上传限制为 JPEG，单帧上限由质量档位控制，只覆盖任务内存中的上一帧；任务结束或取消后保留最后一帧 30 秒，服务关闭时立即清理。
+- admin-ui 使用 Bearer Header 定时读取最新 JPEG，不把登录令牌放入 URL；关闭抽屉或切换用例会停止轮询并释放 Blob URL。
+- Jenkins 和 Extension CDP 的日志、报告与录屏入口保持原行为。
+
+### M6 实时画面质量档位补充（2026-07-19）
+
+- `Playwright Runner 配置` 在浏览器右侧新增实时画面质量下拉框，提供流畅、高清、超清和 8K 四档，平台默认选择高清。
+- admin 只接受白名单质量值，并按档位把单帧内存上限控制为 2MB、4MB、8MB 或 16MB；旧请求未传档位时继续使用原流畅配置。
+- Runner 按档位设置设备像素倍率、JPEG 质量和截图间隔；有头最大化模式保持实际浏览器窗口分辨率，避免违反 Playwright 的 `viewport=null` 限制。
+- admin-ui 实时画面轮询调整为 1 秒，关闭查看器后仍会停止轮询并释放 Blob URL；Jenkins 与 Extension CDP 链路不变。
+- 验证通过：Runner `npm run check`、`npm run test:unit`，admin `mvn -pl continew-automation -am -DskipTests compile`，admin-ui `pnpm typecheck`、定向 ESLint 和 `pnpm build:prod`。

@@ -3,10 +3,16 @@ import path from 'node:path';
 import { timestampForPath } from '../shared/utils.js';
 
 export async function createRunArtifacts({ artifactDir, caseId, testCase, runId: requestedRunId, timestamp = timestampForPath() }) {
-  // runId 继续使用原始 caseKey，保证 admin artifact 上传和执行记录关联方式不变。
+  // 平台任务使用用例 executionId 关联 artifact；旧 CLI 未传值时再生成兼容 runId。
   const safeCaseKey = toSafePathPart(caseId);
-  const runId = String(requestedRunId || '').trim() || `${safeCaseKey}-${timestamp}`;
-  const [runDate = 'unknown-date', runTime = 'unknown-time'] = String(timestamp).split('-', 2);
+  const requestedExecutionId = String(requestedRunId || '').trim();
+  const runId = requestedExecutionId || `${safeCaseKey}-${timestamp}`;
+  const [timestampDate = 'unknown-date', timestampTime = 'unknown-time'] = String(timestamp).split('-', 2);
+  const platformExecutionId = /^\d{14}$/.test(requestedExecutionId) ? requestedExecutionId : '';
+  // 平台执行时以 executionId 作为末级目录，保证日志、历史记录和本地产物可以直接对应。
+  // 未传 executionId 的旧 CLI 仍沿用 HHmmss 目录，保持 test-lab 和手工命令兼容。
+  const runDate = platformExecutionId ? platformExecutionId.slice(0, 8) : timestampDate;
+  const runDirectory = requestedExecutionId || timestampTime;
   const pathMetadata = resolveRunPathMetadata(testCase, caseId);
   const runDir = path.resolve(
     process.cwd(),
@@ -17,7 +23,7 @@ export async function createRunArtifacts({ artifactDir, caseId, testCase, runId:
     pathMetadata.sceneId,
     pathMetadata.caseId,
     toSafePathPart(runDate),
-    toSafePathPart(runTime),
+    toSafePathPart(runDirectory),
   );
   const screenshotsDir = path.join(runDir, 'screenshots');
   const logsDir = path.join(runDir, 'logs');
@@ -34,6 +40,7 @@ export async function createRunArtifacts({ artifactDir, caseId, testCase, runId:
     resultPath: path.join(runDir, 'result.json'),
     reportPath: path.join(runDir, 'report.html'),
     consoleLogPath: path.join(logsDir, 'console.json'),
+    executionLogPath: path.join(logsDir, 'execution-log.json'),
     failureScreenshotPath: path.join(screenshotsDir, 'failure.png'),
     failureHtmlPath: path.join(runDir, 'failure.html'),
     failureTextPath: path.join(domDir, 'failure-text.txt'),
@@ -41,7 +48,7 @@ export async function createRunArtifacts({ artifactDir, caseId, testCase, runId:
   };
 }
 
-function resolveRunPathMetadata(testCase, caseKey) {
+export function resolveRunPathMetadata(testCase, caseKey) {
   const [caseKeyScene = '', ...caseKeyParts] = String(caseKey ?? '').split(':');
   const caseKeyCase = caseKeyParts.join(':');
   return {
@@ -128,6 +135,14 @@ export async function writeConsoleLog(artifacts, result, consoleEvents) {
   return result;
 }
 
+export async function writeExecutionLog(artifacts, result, executionEvents) {
+  const events = Array.isArray(executionEvents) ? executionEvents : [];
+  await writeJson(artifacts.executionLogPath, events);
+  result.artifacts.execution_log = artifacts.executionLogPath;
+  result.artifacts.logs.push(artifacts.executionLogPath);
+  return result;
+}
+
 export async function writeHtmlReport(artifacts, result) {
   const html = renderHtmlReport(result);
   await writeText(artifacts.reportPath, html);
@@ -140,16 +155,19 @@ export async function uploadRunArtifacts(api, artifacts, result) {
   const localArtifacts = result.artifacts || {};
   const candidates = [
     ['console', localArtifacts.console_log],
+    ['execution-log', localArtifacts.execution_log],
     ['video', localArtifacts.video],
     ['trace', localArtifacts.trace],
     ['screenshot', localArtifacts.failure_screenshot],
   ].filter(([, filePath]) => typeof filePath === 'string' && filePath);
   const uploaded = {};
+  const uploadedFileIds = {};
   const errors = [];
   for (const [artifactType, filePath] of candidates) {
     try {
       const artifact = await api.uploadArtifact(result.run_id, artifactType, filePath);
       if (artifact?.url) uploaded[artifactType] = artifact.url;
+      if (artifact?.fileId) uploadedFileIds[artifactType] = String(artifact.fileId);
     } catch (error) {
       errors.push({
         artifact_type: artifactType,
@@ -161,14 +179,18 @@ export async function uploadRunArtifacts(api, artifacts, result) {
 
   // admin 结果只保存受鉴权 URL，Runner 节点绝对路径仅保留在本地 result.json 中。
   result.artifacts = {
-    ...(uploaded.console ? { console_log: uploaded.console, logs: [uploaded.console] } : { logs: [] }),
-    ...(uploaded.video ? { video: uploaded.video, videos: [uploaded.video] } : { videos: [] }),
+    ...(uploaded.console ? { console_log: uploaded.console } : {}),
+    ...(uploaded['execution-log'] ? { execution_log: uploaded['execution-log'] } : {}),
+    ...(uploaded.video ? { video: uploaded.video } : {}),
     ...(uploaded.trace ? { trace: uploaded.trace } : {}),
-    ...(uploaded.screenshot ? {
-      failure_screenshot: uploaded.screenshot,
-      screenshots: [uploaded.screenshot],
-    } : { screenshots: [] }),
-    dom_snapshots: [],
+    ...(uploaded.screenshot ? { failure_screenshot: uploaded.screenshot } : {}),
+  };
+  result.artifact_file_ids = {
+    ...(uploadedFileIds.console ? { console_log: uploadedFileIds.console } : {}),
+    ...(uploadedFileIds['execution-log'] ? { execution_log: uploadedFileIds['execution-log'] } : {}),
+    ...(uploadedFileIds.video ? { video: uploadedFileIds.video } : {}),
+    ...(uploadedFileIds.trace ? { trace: uploadedFileIds.trace } : {}),
+    ...(uploadedFileIds.screenshot ? { failure_screenshot: uploadedFileIds.screenshot } : {}),
   };
   if (localArtifacts.report_html) {
     // 报告最后生成并上传，确保 HTML 中展示的是 admin URL，而不是 Runner 节点绝对路径。
@@ -177,6 +199,7 @@ export async function uploadRunArtifacts(api, artifacts, result) {
     try {
       const report = await api.uploadArtifact(result.run_id, 'report', localArtifacts.report_html);
       if (report?.url) result.artifacts.report_html = report.url;
+      if (report?.fileId) result.artifact_file_ids.report_html = String(report.fileId);
     } catch (error) {
       errors.push({
         artifact_type: 'report',
@@ -187,6 +210,64 @@ export async function uploadRunArtifacts(api, artifacts, result) {
   }
   result.artifact_upload_errors = errors;
   return result;
+}
+
+/**
+ * 清理已经完整上报的历史本地产物。平台模式只删除 artifactDir/runs 内的 run 目录，
+ * 上传或结果回传失败的目录会保留，供后续人工或运维重试。
+ */
+export async function cleanupLocalRunArtifacts(config) {
+  if (!config?.adminApi || config.localArtifactCleanupEnabled !== true) return;
+  const runsRoot = path.resolve(process.cwd(), config.artifactDir, 'runs');
+  const candidates = await findRunDirectories(runsRoot);
+  const now = Date.now();
+  for (const runDir of candidates) {
+    const resultPath = path.join(runDir, 'result.json');
+    const result = await readJson(resultPath);
+    if (!isSafeToDelete(result)) continue;
+    const retentionMs = result.success === true
+      ? Number(config.localArtifactSuccessRetentionHours) * 60 * 60 * 1000
+      : Number(config.localArtifactFailureRetentionDays) * 24 * 60 * 60 * 1000;
+    const stat = await fs.stat(resultPath).catch(() => null);
+    if (!stat || now - stat.mtimeMs < retentionMs || !isRunDirectory(runsRoot, runDir)) continue;
+    await fs.rm(runDir, { recursive: true, force: false });
+  }
+}
+
+async function findRunDirectories(runsRoot) {
+  const entries = await fs.readdir(runsRoot, { withFileTypes: true }).catch(() => []);
+  const result = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const candidate = path.join(runsRoot, entry.name);
+    if ((await fs.stat(path.join(candidate, 'result.json')).catch(() => null))?.isFile()) {
+      result.push(candidate);
+      continue;
+    }
+    result.push(...await findRunDirectories(candidate));
+  }
+  return result;
+}
+
+function isSafeToDelete(result) {
+  return result
+    && result.artifact_delivery?.upload_completed === true
+    && result.artifact_delivery?.result_reported === true
+    && Array.isArray(result.artifact_upload_errors)
+    && result.artifact_upload_errors.length === 0;
+}
+
+function isRunDirectory(runsRoot, candidate) {
+  const relative = path.relative(runsRoot, candidate);
+  return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+async function readJson(filePath) {
+  try {
+    return JSON.parse(await fs.readFile(filePath, 'utf8'));
+  } catch {
+    return null;
+  }
 }
 
 function renderHtmlReport(result) {

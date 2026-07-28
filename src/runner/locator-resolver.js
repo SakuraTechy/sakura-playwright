@@ -1,4 +1,5 @@
 import { RunnerError } from '../shared/utils.js';
+import { resolveSemanticLocator } from './semantic-locator-resolver.js';
 
 const CANDIDATE_TYPES = new Set([
   'css_attr_data-testid',
@@ -48,6 +49,13 @@ const TABLE_WRAPPERS = {
 };
 
 export async function resolveLocator(page, step, options = {}) {
+  if (options.locatorMode === 'semantic-v1') {
+    return resolveSemanticLocator(page, step, options, parseLocatorMeta(step.locator_meta));
+  }
+  return resolveLegacyLocator(page, step, options);
+}
+
+async function resolveLegacyLocator(page, step, options = {}) {
   const meta = parseLocatorMeta(step.locator_meta);
   const candidates = sortCandidates(meta?.candidates || []);
   let lastAmbiguous = null;

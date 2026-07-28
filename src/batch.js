@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { formatPlatformDateTime, loadRunnerEnv, parseBoolean, parseCliArgs, parsePositiveInt, timestampForPath, trimTrailingSlash } from './shared/utils.js';
+import { promoteStorageState } from './runner/session-state.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -14,19 +16,30 @@ async function main() {
   const startedAt = Date.now();
   const batchId = `batch-${timestampForPath()}`;
   const batchDir = path.resolve(process.cwd(), config.artifactDir, 'batches', batchId);
+  const session = await createBatchSession(config, batchId);
+  const activeChildren = new Set();
+  const control = { cancelled: false };
+  const removeSignalHandlers = installSignalHandlers(activeChildren, control);
   await fs.mkdir(batchDir, { recursive: true });
 
-  const results = await runCasePool(config);
-  const summary = createSummary({ batchId, batchDir, config, results, startedAt });
-  const summaryPath = path.join(batchDir, 'summary.json');
-  const reportPath = path.join(batchDir, 'report.html');
-  summary.artifacts.summary_json = summaryPath;
-  summary.artifacts.report_html = reportPath;
-  await writeJson(summaryPath, summary);
-  await fs.writeFile(reportPath, renderBatchReport(summary), 'utf8');
+  try {
+    const results = await runCasePool(config, batchId, session, activeChildren, control);
+    const summary = createSummary({ batchId, batchDir, config, results, startedAt });
+    const summaryPath = path.join(batchDir, 'summary.json');
+    const reportPath = path.join(batchDir, 'report.html');
+    summary.artifacts.summary_json = summaryPath;
+    summary.artifacts.report_html = reportPath;
+    await writeJson(summaryPath, summary);
+    await fs.writeFile(reportPath, renderBatchReport(summary), 'utf8');
 
-  console.log(`[batch] ${summary.status} total=${summary.total} passed=${summary.passed} failed=${summary.failed} artifacts=${batchDir}`);
-  if (summary.failed > 0) process.exitCode = 1;
+    console.log(`[batch] ${summary.status} total=${summary.total} passed=${summary.passed} failed=${summary.failed} artifacts=${batchDir}`);
+    if (summary.failed > 0 || control.cancelled) process.exitCode = control.cancelled ? 130 : 1;
+  } finally {
+    removeSignalHandlers();
+    if (session?.directory) {
+      await fs.rm(session.directory, { recursive: true, force: true }).catch(() => {});
+    }
+  }
 }
 
 function parseBatchArgs(argv = process.argv.slice(2), env = process.env) {
@@ -38,7 +51,15 @@ function parseBatchArgs(argv = process.argv.slice(2), env = process.env) {
     throw new Error('Missing required --case-ids or CUECAST_CASE_IDS');
   }
 
-  const workers = Math.min(parsePositiveInt(args.workers || mergedEnv.RUNNER_WORKERS, 1), caseIds.length);
+  const requestedWorkers = parsePositiveInt(args.workers || mergedEnv.RUNNER_WORKERS, 1);
+  const workers = Math.min(requestedWorkers, caseIds.length);
+  const sessionMode = args['session-mode'] || mergedEnv.RUNNER_SESSION_MODE || 'isolated';
+  if (!['isolated', 'reuse-auth'].includes(sessionMode)) {
+    throw new Error(`Unsupported session mode: ${sessionMode}`);
+  }
+  if (sessionMode === 'reuse-auth' && requestedWorkers !== 1) {
+    throw new Error('reuse-auth session mode requires --workers 1');
+  }
   return {
     caseIds,
     apiBase: trimTrailingSlash(args['api-base'] || mergedEnv.CUECAST_API_BASE || 'http://127.0.0.1:4173/api'),
@@ -53,8 +74,10 @@ function parseBatchArgs(argv = process.argv.slice(2), env = process.env) {
     timeout: args.timeout || mergedEnv.RUNNER_STEP_TIMEOUT_MS || '',
     caseTimeout: args['case-timeout'] || mergedEnv.RUNNER_CASE_TIMEOUT_MS || '',
     startStep: args['start-step'] || '',
+    sessionMode,
+    storageState: args['storage-state'] || mergedEnv.RUNNER_STORAGE_STATE || mergedEnv.CUECAST_STORAGE_STATE || '',
     workers,
-    artifactDir: args['artifact-dir'] || mergedEnv.RUNNER_ARTIFACT_DIR || 'playwright-runner-artifacts',
+    artifactDir: args['artifact-dir'] || mergedEnv.RUNNER_ARTIFACT_DIR || 'artifacts',
   };
 }
 
@@ -65,14 +88,14 @@ function splitCaseIds(raw) {
     .filter(Boolean);
 }
 
-async function runCasePool(config) {
-  const queue = [...config.caseIds];
+async function runCasePool(config, batchId, session, activeChildren, control) {
+  const queue = config.caseIds.map((caseId, index) => ({ caseId, index }));
   const results = [];
   const workerCount = Math.max(1, config.workers);
   await Promise.all(Array.from({ length: workerCount }, async () => {
-    while (queue.length) {
-      const caseId = queue.shift();
-      const result = await runOneCase(caseId, config);
+    while (queue.length && !control.cancelled) {
+      const { caseId, index } = queue.shift();
+      const result = await runOneCase(caseId, index, config, batchId, session, activeChildren);
       results.push(result);
     }
   }));
@@ -80,19 +103,29 @@ async function runCasePool(config) {
   return results.sort((a, b) => order.get(String(a.case_id)) - order.get(String(b.case_id)));
 }
 
-function runOneCase(caseId, config) {
+async function runOneCase(caseId, caseIndex, config, batchId, session, activeChildren) {
   const startedAt = Date.now();
+  const storageStateInput = session
+    ? await existingStorageState(session.currentPath, config.storageState)
+    : config.storageState;
+  const storageStateOutput = session
+    ? path.join(session.candidatesDir, `${caseIndex}-${safePathSegment(caseId)}.json`)
+    : '';
   const args = [
     runnerPath,
     '--case-id', String(caseId),
+    '--batch-id', batchId,
     '--api-base', config.apiBase,
     '--admin-api', String(config.adminApi),
     '--browser', config.browser,
     '--headed', String(config.headed),
     '--trace', config.trace,
     '--video', config.video,
+    '--session-mode', config.sessionMode,
     '--artifact-dir', config.artifactDir,
   ];
+  if (storageStateInput) args.push('--storage-state', storageStateInput);
+  if (storageStateOutput) args.push('--storage-state-out', storageStateOutput);
   if (config.token) args.push('--token', config.token);
   if (config.timeout) args.push('--timeout', String(config.timeout));
   if (config.caseTimeout) args.push('--case-timeout', String(config.caseTimeout));
@@ -106,6 +139,7 @@ function runOneCase(caseId, config) {
       env: { ...process.env },
       windowsHide: true,
     });
+    activeChildren.add(child);
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
@@ -114,13 +148,25 @@ function runOneCase(caseId, config) {
       stderr += error.message || String(error);
     });
     child.on('close', async (code) => {
+      activeChildren.delete(child);
       const artifactDir = parseArtifactDir(stdout);
       const resultPath = artifactDir ? path.join(artifactDir, 'result.json') : '';
       const resultJson = await readJson(resultPath);
+      let success = code === 0;
+      if (success && session) {
+        try {
+          await promoteStorageState(storageStateOutput, session.currentPath);
+        } catch (error) {
+          success = false;
+          stderr += `${stderr ? '\n' : ''}${error?.message || String(error)}`;
+        }
+      } else if (storageStateOutput) {
+        await fs.rm(storageStateOutput, { force: true }).catch(() => {});
+      }
       resolve({
         case_id: Number(caseId) || caseId,
-        status: code === 0 ? 'passed' : 'failed',
-        success: code === 0,
+        status: success ? 'passed' : 'failed',
+        success,
         exit_code: code,
         duration_ms: Date.now() - startedAt,
         artifact_dir: artifactDir,
@@ -133,6 +179,46 @@ function runOneCase(caseId, config) {
       });
     });
   });
+}
+
+async function createBatchSession(config, batchId) {
+  if (config.sessionMode !== 'reuse-auth') return null;
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), `${safePathSegment(batchId)}-`));
+  const candidatesDir = path.join(directory, 'candidates');
+  await fs.mkdir(candidatesDir, { recursive: true });
+  return {
+    directory,
+    currentPath: path.join(directory, 'current.json'),
+    candidatesDir,
+  };
+}
+
+async function existingStorageState(currentPath, initialPath) {
+  try {
+    await fs.access(currentPath);
+    return currentPath;
+  } catch {
+    return initialPath || '';
+  }
+}
+
+function safePathSegment(value) {
+  return String(value || 'case').replace(/[^A-Za-z0-9._-]/g, '_');
+}
+
+function installSignalHandlers(activeChildren, control) {
+  const handleSignal = () => {
+    control.cancelled = true;
+    for (const child of activeChildren) {
+      child.kill();
+    }
+  };
+  process.once('SIGINT', handleSignal);
+  process.once('SIGTERM', handleSignal);
+  return () => {
+    process.removeListener('SIGINT', handleSignal);
+    process.removeListener('SIGTERM', handleSignal);
+  };
 }
 
 function parseArtifactDir(stdout) {
@@ -162,6 +248,7 @@ function createSummary({ batchId, batchDir, config, results, startedAt }) {
     passed,
     failed,
     workers: config.workers,
+    session_mode: config.sessionMode,
     case_ids: config.caseIds,
     api_base: config.apiBase,
     trace: config.trace,
@@ -232,11 +319,12 @@ function artifactLink(label, filePath) {
 
 function toArtifactHref(filePath) {
   const raw = String(filePath || '').replaceAll('\\', '/');
-  const marker = 'playwright-runner-artifacts/';
-  const index = raw.indexOf(marker);
-  if (index >= 0) {
-    const relative = raw.slice(index + marker.length);
-    return `../../${relative}`;
+  for (const marker of ['artifacts/', 'playwright-runner-artifacts/']) {
+    const index = raw.indexOf(marker);
+    if (index >= 0) {
+      const relative = raw.slice(index + marker.length);
+      return `../../${relative}`;
+    }
   }
   return raw;
 }

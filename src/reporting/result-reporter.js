@@ -3,6 +3,7 @@ import { durationMs, formatPlatformDateTime, serializeError } from '../shared/ut
 export function createRunResult({ config, artifacts, startedAt }) {
   const result = {
     case_id: Number(config.caseId) || config.caseId,
+    job_id: config.jobId || '',
     batch_id: config.batchId || '',
     run_id: artifacts.runId,
     executor: 'playwright-runner',
@@ -26,7 +27,12 @@ export function createRunResult({ config, artifacts, startedAt }) {
     },
     raw: {
       project_environment_id: config.projectEnvironmentId || '',
+      session_mode: config.sessionMode,
+      auth_state_loaded: false,
+      auth_state_saved: false,
       ignore_https_errors: config.ignoreHttpsErrors,
+      locator_mode: config.locatorMode,
+      page_error_check_enabled: config.pageErrorCheckEnabled,
       step_timeout_ms: config.timeoutMs,
       case_timeout_ms: config.caseTimeoutMs,
       slow_mo_ms: config.slowMoMs,
@@ -60,6 +66,7 @@ export function markStepFailed(result, step, error, startedAt) {
   result.steps.push({
     step_index: step.step_index,
     step_id: step.id,
+    ...(step.original_step_id != null ? { original_step_id: step.original_step_id } : {}),
     action_type: step.action_type,
     status: 'failed',
     duration_ms: durationMs(startedAt),
@@ -68,6 +75,8 @@ export function markStepFailed(result, step, error, startedAt) {
     locator_source: serialized.details?.source || serialized.details?.locator_source || '',
     locator_type: serialized.details?.locatorType || serialized.details?.locator_type || '',
     locator_value: serialized.details?.locatorValue || serialized.details?.locator_value || '',
+    matched_count: serialized.details?.matchedCount ?? null,
+    visible_count: serialized.details?.visibleCount ?? null,
     details: serialized.details,
   });
   return serialized;
@@ -92,6 +101,10 @@ export function markRunFailed(result, error) {
 export function finalizeRunResult(result, startedAt) {
   result.finished_at = formatPlatformDateTime();
   result.duration_ms = durationMs(startedAt);
+  result.step_duration_ms = result.steps.reduce(
+    (total, step) => total + Math.max(0, Number(step.duration_ms) || 0),
+    0,
+  );
   return result;
 }
 

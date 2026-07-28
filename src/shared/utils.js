@@ -23,6 +23,7 @@ export function parseArgs(argv = process.argv.slice(2), env = process.env) {
     caseId: args['case-id'] || mergedEnv.CUECAST_CASE_ID || '',
     batchId: args['batch-id'] || mergedEnv.CUECAST_BATCH_ID || '',
     runId: args['run-id'] || mergedEnv.CUECAST_RUN_ID || '',
+    jobId: args['job-id'] || mergedEnv.CUECAST_JOB_ID || '',
     projectEnvironmentId: args['project-environment-id'] || mergedEnv.CUECAST_PROJECT_ENVIRONMENT_ID || '',
     apiBase: trimTrailingSlash(args['api-base'] || mergedEnv.CUECAST_API_BASE || 'http://127.0.0.1:4173/api'),
     // 平台任务未传 API 地址时使用 .env 的 admin 协议；旧 test-lab 命令显式传入 mock API 时保持原协议。
@@ -30,8 +31,16 @@ export function parseArgs(argv = process.argv.slice(2), env = process.env) {
     adminApi: parseBoolean(args['admin-api'] ?? (args['api-base'] == null ? mergedEnv.CUECAST_ADMIN_API : false), false),
     token: args.token || mergedEnv.CUECAST_TOKEN || '',
     browser: args.browser || mergedEnv.RUNNER_BROWSER || 'chromium',
+    liveFrameQuality: args['live-frame-quality'] || mergedEnv.RUNNER_LIVE_FRAME_QUALITY || 'smooth',
     headed: parseBoolean(args.headed ?? mergedEnv.RUNNER_HEADED, false),
     ignoreHttpsErrors: parseBoolean(args['ignore-https-errors'] ?? mergedEnv.RUNNER_IGNORE_HTTPS_ERRORS, false),
+    pageErrorCheckEnabled: parseOptionalBoolean(
+      args['page-error-check-enabled'] ?? mergedEnv.RUNNER_PAGE_ERROR_CHECK_ENABLED,
+    ),
+    sessionMode: args['session-mode'] || mergedEnv.RUNNER_SESSION_MODE || 'isolated',
+    storageState: args['storage-state'] || mergedEnv.RUNNER_STORAGE_STATE || mergedEnv.CUECAST_STORAGE_STATE || '',
+    storageStateOut: args['storage-state-out'] || '',
+    locatorMode: args['locator-mode'] || mergedEnv.RUNNER_LOCATOR_MODE || 'legacy',
     slowMoMs: parseIntegerInRange(args['slow-mo'] ?? mergedEnv.RUNNER_SLOW_MO_MS, 0, 0, 10000, 'slow-mo'),
     finishDelayMs: parseIntegerInRange(args['finish-delay'] ?? mergedEnv.RUNNER_FINISH_DELAY_MS, 0, 0, 600000, 'finish-delay'),
     timeoutMs: parseIntegerInRange(args.timeout ?? mergedEnv.RUNNER_STEP_TIMEOUT_MS, 6000, 1000, 300000, 'timeout'),
@@ -39,7 +48,23 @@ export function parseArgs(argv = process.argv.slice(2), env = process.env) {
     startStep: parseNonNegativeInt(args['start-step'], 0),
     trace: args.trace || mergedEnv.RUNNER_TRACE || 'off',
     video: args.video || mergedEnv.RUNNER_VIDEO || 'off',
-    artifactDir: args['artifact-dir'] || mergedEnv.RUNNER_ARTIFACT_DIR || 'playwright-runner-artifacts',
+    artifactDir: args['artifact-dir'] || mergedEnv.RUNNER_ARTIFACT_DIR || 'artifacts',
+    logDir: args['log-dir'] || mergedEnv.RUNNER_LOG_DIR || 'logs',
+    localArtifactCleanupEnabled: parseBoolean(mergedEnv.RUNNER_LOCAL_ARTIFACT_CLEANUP_ENABLED, true),
+    localArtifactSuccessRetentionHours: parseIntegerInRange(
+      mergedEnv.RUNNER_LOCAL_ARTIFACT_SUCCESS_RETENTION_HOURS,
+      24,
+      1,
+      24 * 365,
+      'local-artifact-success-retention-hours',
+    ),
+    localArtifactFailureRetentionDays: parseIntegerInRange(
+      mergedEnv.RUNNER_LOCAL_ARTIFACT_FAILURE_RETENTION_DAYS,
+      7,
+      1,
+      3650,
+      'local-artifact-failure-retention-days',
+    ),
   };
 
   if (!config.caseId) {
@@ -47,6 +72,21 @@ export function parseArgs(argv = process.argv.slice(2), env = process.env) {
   }
   if (!['chromium', 'firefox', 'webkit'].includes(config.browser)) {
     throw new RunnerError('CONFIG_INVALID', `Unsupported browser: ${config.browser}`);
+  }
+  if (!['smooth', 'high', 'ultra', '8k'].includes(config.liveFrameQuality)) {
+    throw new RunnerError('CONFIG_INVALID', `Unsupported live frame quality: ${config.liveFrameQuality}`);
+  }
+  if (!['legacy', 'semantic-v1'].includes(config.locatorMode)) {
+    throw new RunnerError('CONFIG_INVALID', `Unsupported locator mode: ${config.locatorMode}`);
+  }
+  if (!['isolated', 'reuse-auth'].includes(config.sessionMode)) {
+    throw new RunnerError('CONFIG_INVALID', `Unsupported session mode: ${config.sessionMode}`);
+  }
+  if (config.sessionMode === 'reuse-auth' && !config.batchId) {
+    throw new RunnerError('CONFIG_INVALID', 'reuse-auth session mode requires --batch-id');
+  }
+  if (config.sessionMode === 'reuse-auth' && !config.storageStateOut) {
+    throw new RunnerError('CONFIG_INVALID', 'reuse-auth session mode requires --storage-state-out');
   }
   if (!['off', 'on', 'retain-on-failure'].includes(config.trace)) {
     throw new RunnerError('CONFIG_INVALID', `Unsupported trace policy: ${config.trace}`);
@@ -144,6 +184,14 @@ export function parseNonNegativeInt(value, fallback) {
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
 }
 
+export function parseOptionalBoolean(value) {
+  if (value == null || value === '') return null;
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'y', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'n', 'off'].includes(normalized)) return false;
+  throw new RunnerError('CONFIG_INVALID', 'Invalid --page-error-check-enabled: expected true or false');
+}
+
 function parseIntegerInRange(value, fallback, min, max, name) {
   if (value == null || value === '') return fallback;
   const number = Number(value);
@@ -164,6 +212,12 @@ export function sleep(ms) {
 export function formatPlatformDateTime(date = new Date()) {
   const parts = platformDateTimeParts(date);
   return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+}
+
+export function formatPlatformDateTimeWithMillis(date = new Date()) {
+  const value = date instanceof Date ? date : new Date(date);
+  const parts = platformDateTimeParts(value);
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}.${String(value.getMilliseconds()).padStart(3, '0')}`;
 }
 
 export function timestampForPath(date = new Date()) {

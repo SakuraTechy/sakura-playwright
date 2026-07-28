@@ -2,6 +2,9 @@ import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { parseLocatorMeta, resolveLocator } from './locator-resolver.js';
+import { isOverlayStep } from './semantic-locator-resolver.js';
+import { showStepAction } from './action-visualizer.js';
+import { collectPageSummary, throwIfPageError } from './page-state-diagnostics.js';
 import { formatPlatformDateTime, RunnerError, sleep } from '../shared/utils.js';
 
 export async function runStep(page, testCase, step, options = {}) {
@@ -12,94 +15,136 @@ export async function runStep(page, testCase, step, options = {}) {
   let locatorInfo = null;
   let extra = {};
 
+  await throwIfPageError(page, options.pageErrorCheckEnabled);
+
   switch (action) {
     case 'navigate': {
       const url = String(step.value || step.url || testCase.start_url || '').trim();
       if (!url) throw new RunnerError('CASE_INVALID', 'navigate step has no URL');
+      await showStepAction(page, step, null, options);
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: options.timeoutMs });
       break;
     }
 
     case 'click': {
       locatorInfo = await resolveLocator(page, step, options);
-      await locatorInfo.locator.click({ timeout: options.timeoutMs });
+      await showStepAction(page, step, locatorInfo.locator, options);
+      await runLocatorAction(page, locatorInfo, options, () => locatorInfo.locator.click({ timeout: options.timeoutMs }));
       break;
     }
 
     case 'click_open_page': {
       locatorInfo = await resolveLocator(page, step, options);
-      extra = await clickOpenPage(page, locatorInfo.locator, options);
+      await showStepAction(page, step, locatorInfo.locator, options);
+      extra = await runLocatorAction(page, locatorInfo, options, () => clickOpenPage(page, locatorInfo.locator, options));
       break;
     }
 
     case 'switch_page': {
+      await showStepAction(page, step, null, options);
       extra = await switchPage(page, step.value, options);
       break;
     }
 
     case 'close_page': {
+      await showStepAction(page, step, null, options);
       extra = await closePage(page, step.value, options);
       break;
     }
 
     case 'double_click': {
       locatorInfo = await resolveLocator(page, step, options);
-      await locatorInfo.locator.dblclick({ timeout: options.timeoutMs });
+      await showStepAction(page, step, locatorInfo.locator, options);
+      await runLocatorAction(page, locatorInfo, options, () => locatorInfo.locator.dblclick({ timeout: options.timeoutMs }));
       break;
     }
 
     case 'right_click': {
       locatorInfo = await resolveLocator(page, step, options);
-      await locatorInfo.locator.click({ button: 'right', timeout: options.timeoutMs });
+      await showStepAction(page, step, locatorInfo.locator, options);
+      await runLocatorAction(page, locatorInfo, options, () => locatorInfo.locator.click({ button: 'right', timeout: options.timeoutMs }));
       break;
     }
 
     case 'input': {
       locatorInfo = await resolveLocator(page, step, options);
-      await fillInput(page, locatorInfo.locator, step.value ?? '', options);
+      await showStepAction(page, step, locatorInfo.locator, options);
+      await runLocatorAction(
+        page,
+        locatorInfo,
+        options,
+        () => fillInput(page, locatorInfo.locator, step.value ?? '', options, step),
+      );
       break;
     }
 
     case 'file_upload': {
       locatorInfo = await resolveLocator(page, step, options);
+      await showStepAction(page, step, locatorInfo.locator, options);
       extra = await uploadFiles(page, locatorInfo.locator, step.value, options);
       break;
     }
 
     case 'assert_download': {
       locatorInfo = await resolveLocator(page, step, options);
-      extra = await assertDownload(page, locatorInfo.locator, step.value, options);
+      await showStepAction(page, step, locatorInfo.locator, options);
+      extra = await runLocatorAction(
+        page,
+        locatorInfo,
+        options,
+        () => assertDownload(page, locatorInfo.locator, step.value, options),
+      );
       break;
     }
 
     case 'assert_json': {
+      await showStepAction(page, step, null, options);
       locatorInfo = await runAssertJson(page, step, options);
       break;
     }
 
     case 'assert_request': {
       locatorInfo = hasLocator(step) ? await resolveLocator(page, step, options) : null;
-      extra = await assertRequest(page, locatorInfo?.locator || null, step.value, options);
+      await showStepAction(page, step, locatorInfo?.locator || null, options);
+      extra = locatorInfo
+        ? await runLocatorAction(
+          page,
+          locatorInfo,
+          options,
+          () => assertRequest(page, locatorInfo.locator, step.value, options),
+        )
+        : await assertRequest(page, null, step.value, options);
       break;
     }
 
     case 'assert_response': {
       locatorInfo = hasLocator(step) ? await resolveLocator(page, step, options) : null;
-      extra = await assertResponse(page, locatorInfo?.locator || null, step.value, options, step);
+      await showStepAction(page, step, locatorInfo?.locator || null, options);
+      extra = locatorInfo
+        ? await runLocatorAction(
+          page,
+          locatorInfo,
+          options,
+          () => assertResponse(page, locatorInfo.locator, step.value, options, step),
+        )
+        : await assertResponse(page, null, step.value, options, step);
       break;
     }
 
     case 'assert_request_count': {
+      await showStepAction(page, step, null, options);
       extra = assertRequestCount(step.value, options);
       break;
     }
 
     case 'network_mock': {
+      await showStepAction(page, step, null, options);
       extra = await registerNetworkMock(page, step.value);
       break;
     }
 
     case 'network_replay': {
+      await showStepAction(page, step, null, options);
       extra = await registerNetworkReplay(page, step.value);
       break;
     }
@@ -107,8 +152,15 @@ export async function runStep(page, testCase, step, options = {}) {
     case 'key': {
       if (hasLocator(step)) {
         locatorInfo = await resolveLocator(page, step, options);
-        await locatorInfo.locator.press(String(step.value || 'Enter'), { timeout: options.timeoutMs });
+        await showStepAction(page, step, locatorInfo.locator, options);
+        await runLocatorAction(
+          page,
+          locatorInfo,
+          options,
+          () => locatorInfo.locator.press(String(step.value || 'Enter'), { timeout: options.timeoutMs }),
+        );
       } else {
+        await showStepAction(page, step, null, options);
         await page.keyboard.press(String(step.value || 'Enter'));
       }
       break;
@@ -116,22 +168,28 @@ export async function runStep(page, testCase, step, options = {}) {
 
     case 'hover': {
       locatorInfo = await resolveLocator(page, step, options);
-      await locatorInfo.locator.hover({ timeout: options.timeoutMs });
+      await showStepAction(page, step, locatorInfo.locator, options);
+      await runLocatorAction(page, locatorInfo, options, () => locatorInfo.locator.hover({ timeout: options.timeoutMs }));
       break;
     }
 
     case 'wait': {
+      await showStepAction(page, step, null, options);
       await sleep(Number(step.value) || step.wait_before || 1000);
       break;
     }
 
     case 'scroll': {
-      await runScroll(page, step, options);
+      locatorInfo = hasLocator(step) ? await resolveLocator(page, step, options) : null;
+      await showStepAction(page, step, locatorInfo?.locator || null, options);
+      await runScroll(page, step, options, locatorInfo?.locator || null);
       break;
     }
 
     case 'assert_text': {
-      locatorInfo = await runAssertText(page, step, options);
+      locatorInfo = hasLocator(step) ? await resolveLocator(page, step, options) : null;
+      await showStepAction(page, step, locatorInfo?.locator || null, options);
+      locatorInfo = await runAssertText(page, step, options, locatorInfo);
       break;
     }
 
@@ -139,10 +197,18 @@ export async function runStep(page, testCase, step, options = {}) {
       throw new RunnerError('UNSUPPORTED_STEP', `Unsupported action_type: ${step.action_type}`, { action_type: step.action_type });
   }
 
+  const pageErrorDetails = {
+    locator_diagnostics: locatorInfo?.diagnostics,
+    recent_resource_failures: recentResourceFailures(options),
+  };
+  await throwIfPageError(page, options.pageErrorCheckEnabled, pageErrorDetails);
   await sleep(options.afterStepDelayMs ?? 250);
+  // 部分接口错误提示在点击完成后异步出现；最后一步也必须在稳定等待后再检查一次。
+  await throwIfPageError(page, options.pageErrorCheckEnabled, pageErrorDetails);
   return {
     step_index: step.step_index,
     step_id: step.id,
+    ...(step.original_step_id != null ? { original_step_id: step.original_step_id } : {}),
     action_type: action,
     status: 'passed',
     duration_ms: Date.now() - startedAt,
@@ -151,11 +217,111 @@ export async function runStep(page, testCase, step, options = {}) {
     locator_value: locatorInfo?.locatorValue || '',
     matched_count: locatorInfo?.matchedCount ?? null,
     visible_count: locatorInfo?.visibleCount ?? null,
+    ...(locatorInfo?.diagnostics ? { details: { locator_diagnostics: locatorInfo.diagnostics } } : {}),
     ...extra,
   };
 }
 
-async function fillInput(page, locator, value, options) {
+async function runLocatorAction(page, locatorInfo, options, action) {
+  try {
+    return await action();
+  } catch (error) {
+    if (options.locatorMode !== 'semantic-v1') throw error;
+    const locatorActionFailed = isLocatorActionFailure(error);
+    const actionability = await diagnoseLocatorAction(locatorInfo.locator);
+    const details = {
+      source: locatorInfo.source,
+      locatorType: locatorInfo.locatorType,
+      locatorValue: locatorInfo.locatorValue,
+      matchedCount: locatorInfo.matchedCount,
+      visibleCount: locatorInfo.visibleCount,
+      locator_diagnostics: {
+        ...(locatorInfo.diagnostics || {}),
+        outcome: 'action-failed',
+        actionability,
+      },
+      page: await collectPageSummary(page),
+      recent_resource_failures: recentResourceFailures(options),
+    };
+    // 断言或 popup 等后续等待失败时保留原错误码，只补充定位诊断；仅 Playwright 元素动作失败才重新分类。
+    if (error instanceof RunnerError || !locatorActionFailed) {
+      if (error && typeof error === 'object') {
+        error.details = { ...details, ...(error.details || {}) };
+      }
+      throw error;
+    }
+    if (!actionability.attached) {
+      throw new RunnerError('LOCATOR_NOT_FOUND', '目标元素在操作前已从页面移除', details);
+    }
+    if (!actionability.visible) {
+      throw new RunnerError('LOCATOR_HIDDEN', '目标元素在操作前不可见', details);
+    }
+    if (!actionability.enabled) {
+      throw new RunnerError('LOCATOR_DISABLED', '目标元素在操作前处于禁用状态', details);
+    }
+    if (actionability.covered) {
+      throw new RunnerError('LOCATOR_COVERED', '目标元素中心点被其他元素遮挡', details);
+    }
+    if (error && typeof error === 'object') {
+      error.details = details;
+    }
+    throw error;
+  }
+}
+
+function isLocatorActionFailure(error) {
+  const message = String(error?.message || '').toLowerCase();
+  return /locator\.(?:click|dblclick|hover|fill|press|type|check|uncheck|setinputfiles)/.test(message)
+    || message.includes('waiting for locator')
+    || message.includes('element is not visible')
+    || message.includes('element is not enabled')
+    || message.includes('intercepts pointer events');
+}
+
+async function diagnoseLocatorAction(locator) {
+  const attached = await locator.count().then((count) => count > 0).catch(() => false);
+  if (!attached) return { attached: false, visible: false, enabled: false, covered: false };
+  const [visible, enabled, hitTest] = await Promise.all([
+    locator.isVisible({ timeout: 0 }).catch(() => false),
+    locator.isEnabled({ timeout: 0 }).catch(() => false),
+    locator.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      const hit = document.elementFromPoint(centerX, centerY);
+      const brief = (node) => {
+        if (!node) return '';
+        const tag = String(node.tagName || '').toLowerCase();
+        const id = node.id ? `#${node.id}` : '';
+        const cls = typeof node.className === 'string' && node.className.trim()
+          ? `.${node.className.trim().replace(/\s+/g, '.')}`
+          : '';
+        return `${tag}${id}${cls}`.slice(0, 300);
+      };
+      const receivesEvents = Boolean(hit && (hit === element || element.contains(hit) || hit.contains(element)));
+      return {
+        target: brief(element),
+        hit: brief(hit),
+        covered: rect.width > 0 && rect.height > 0 && !receivesEvents,
+        rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+      };
+    }).catch(() => ({ target: '', hit: '', covered: false, rect: null })),
+  ]);
+  return { attached, visible, enabled, ...hitTest };
+}
+
+function recentResourceFailures(options) {
+  return (Array.isArray(options.diagnosticEvents) ? options.diagnosticEvents : [])
+    .filter((event) => event?.type === 'requestfailed')
+    .slice(-10)
+    .map((event) => ({
+      url: String(event.text || '').slice(0, 2000),
+      failure: String(event.failure || '').slice(0, 500),
+      timestamp: event.timestamp || '',
+    }));
+}
+
+async function fillInput(page, locator, value, options, step = {}) {
   const tag = await locator.evaluate((el) => el.tagName.toLowerCase()).catch(() => '');
   if (await isMonacoEditor(locator)) {
     await fillMonacoEditor(page, locator, value, options);
@@ -177,6 +343,14 @@ async function fillInput(page, locator, value, options) {
     return;
   }
   if (await isCustomSelect(locator)) {
+    if (isRecordedSelectSearch(step, options.nextStep)) {
+      const searchInput = await findCustomSelectInput(locator);
+      if (searchInput) {
+        // Element/Ant Select 的录制输入只负责过滤选项，不能在此步骤提前点击选项。
+        await searchInput.fill(String(value ?? ''), { timeout: options.timeoutMs });
+        return;
+      }
+    }
     await selectCustomOption(page, locator, value, options);
     return;
   }
@@ -401,23 +575,21 @@ async function pageDebugList(pages) {
   })));
 }
 
-async function runScroll(page, step, options) {
-  if (hasLocator(step)) {
-    const info = await resolveLocator(page, step, options);
-    await info.locator.scrollIntoViewIfNeeded({ timeout: options.timeoutMs });
+async function runScroll(page, step, options, locator) {
+  if (locator) {
+    await locator.scrollIntoViewIfNeeded({ timeout: options.timeoutMs });
     return;
   }
   const y = Number(step.value) || 500;
   await page.mouse.wheel(0, y);
 }
 
-async function runAssertText(page, step, options) {
+async function runAssertText(page, step, options, locatorInfo) {
   const expected = String(step.value ?? '');
-  if (hasLocator(step)) {
-    const info = await resolveLocator(page, step, options);
-    const actual = await info.locator.textContent({ timeout: options.timeoutMs });
+  if (locatorInfo) {
+    const actual = await locatorInfo.locator.textContent({ timeout: options.timeoutMs });
     assertContains(actual, expected, step);
-    return info;
+    return locatorInfo;
   }
   const bodyText = await page.locator('body').textContent({ timeout: options.timeoutMs });
   assertContains(bodyText, expected, step);
@@ -1135,6 +1307,35 @@ async function isCustomSelect(locator) {
       || className.includes('ant-select')
       || className.includes('el-select');
   }).catch(() => false);
+}
+
+function isRecordedSelectSearch(step, nextStep) {
+  if (!nextStep || String(step?.action_type || '').toLowerCase() !== 'input') return false;
+  const nextAction = String(nextStep.action_type || '').toLowerCase();
+  if (!['click', 'click_open_page', 'double_click', 'right_click'].includes(nextAction)) return false;
+  const value = String(nextStep.value ?? '').trim();
+  if (!value) return false;
+  const meta = parseLocatorMeta(nextStep.locator_meta);
+  return isOverlayStep(nextStep, meta?.context || {});
+}
+
+async function findCustomSelectInput(locator) {
+  const tag = await locator.evaluate((element) => String(element.tagName || '').toLowerCase()).catch(() => '');
+  if (['input', 'textarea'].includes(tag)) {
+    return locator;
+  }
+  const candidates = locator.locator([
+    'input:not([type="hidden"])',
+    'textarea',
+    '[role="textbox"]',
+    '[contenteditable="true"]',
+  ].join(', '));
+  const count = await candidates.count().catch(() => 0);
+  for (let index = 0; index < count; index += 1) {
+    const candidate = candidates.nth(index);
+    if (await candidate.isVisible({ timeout: 0 }).catch(() => false)) return candidate;
+  }
+  return null;
 }
 
 async function isMonacoEditor(locator) {

@@ -119,6 +119,43 @@ export class ApiClient {
       clearTimeout(timer);
     }
   }
+
+  async pushLiveFrame(jobId, frame) {
+    if (!this.adminApi || !jobId) return null;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.min(this.timeoutMs, 10000));
+    const headers = { 'Content-Type': 'image/jpeg' };
+    if (this.token) {
+      headers.Authorization = !/^Bearer\s+/i.test(this.token) ? `Bearer ${this.token}` : this.token;
+    }
+    try {
+      const bases = [this.apiBase];
+      if (/\/api$/i.test(this.apiBase)) bases.push(this.apiBase.slice(0, -4));
+      for (let index = 0; index < bases.length; index += 1) {
+        const res = await fetch(`${bases[index]}/automation/playwright/runner/jobs/${encodeURIComponent(jobId)}/live-frame`, {
+          method: 'PUT',
+          headers,
+          body: frame,
+          signal: controller.signal,
+        });
+        const payload = await res.json().catch(() => null);
+        if (!res.ok || !(payload && (payload.success === true || payload.code === 0 || payload.code === '0'))) {
+          if ((res.status === 404 || String(payload?.code) === '404') && index < bases.length - 1) continue;
+          const message = payload?.message || payload?.msg || `live frame upload failed with HTTP ${res.status}`;
+          throw new RunnerError('INFRA_LIVE_FRAME_FAILED', message, { payload });
+        }
+        return payload.data;
+      }
+      return null;
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        throw new RunnerError('INFRA_LIVE_FRAME_FAILED', 'live frame upload timed out');
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 }
 
 function encodeAdminCasePath(caseKey) {

@@ -34,9 +34,9 @@ admin 场景页的“扩展 CDP 回放”和“Playwright Runner 回放”共用
 
 CDP 弹窗可选择最大化、当前窗口或自定义窗口；自定义宽高范围为 `320–10000`。页面错误检测对应 `page_error_check_enabled`，“AI 深度分析”仅为预留说明。弹窗值优先于录制值，布尔值 `false` 和数值 `0` 也会作为有效覆盖值。
 
-Runner 弹窗本次任务使用中文名称展示浏览器、显示浏览器窗口、忽略 HTTPS 证书错误、追踪文件保留策略、录屏保留策略、单步骤超时、用例总超时、操作慢放和执行结束停留。对应传输字段仍为 `browser`、`headed`、`ignoreHttpsErrors`、`trace`、`video`、`stepTimeoutMs`、`caseTimeoutMs`、`slowMoMs`、`finishDelayMs`。默认值依次为 `chromium`、`false`、`true`、`retain-on-failure`、`retain-on-failure`、`6000`、`600000`、`0`、`0`。admin 仅把白名单字段转换为 CLI 参数，CLI 参数优先于 `.env`；`RUNNER_WORKERS`、artifact 目录、token 和 storage state 仍由服务端管理。总用例超时会关闭 context/browser，并按失败结果正常回传。弹窗底部按 Jenkins 模板展示场景信息；当前单场景、单用例回放会使用详情页指定用例，场景入口则使用首个可执行用例。
+Runner 弹窗本次任务使用中文名称展示浏览器、显示浏览器窗口、忽略 HTTPS 证书错误、追踪文件保留策略、录屏保留策略、单步骤超时、用例总超时、操作慢放、执行结束停留和页面错误检测策略。页面错误检测为三态：`继承用例` 不传任务字段，`启用` 和 `禁用` 分别显式传 `true`、`false`。对应传输字段仍为 `browser`、`headed`、`ignoreHttpsErrors`、`trace`、`video`、`stepTimeoutMs`、`caseTimeoutMs`、`slowMoMs`、`finishDelayMs`、`pageErrorCheckEnabled`。admin 创建的 Runner Job 还会固定传入 `--locator-mode semantic-v1`，使录制的候选定位、上下文评分和可交互代理转换生效；手工 CLI 与 Jenkins 默认仍是 `legacy`。admin 仅把白名单字段转换为 CLI 参数，CLI 参数优先于 `.env`；`RUNNER_WORKERS`、artifact 目录、token 和 storage state 仍由服务端管理。总用例超时会关闭 context/browser，并按失败结果正常回传。弹窗底部按 Jenkins 模板展示场景信息；当前单场景、单用例回放会使用详情页指定用例，场景入口则使用首个可执行用例。
 
-CDP/Runner 执行链路中的开始时间、结束时间、诊断日志时间和响应快照时间统一为北京时间 `yyyy-MM-dd HH:mm:ss`。admin Runner 任务状态以及写入 `AutomationUiSceneDO.debugRecord` 的顶层和 `playwrightResult` 嵌套执行时间使用同一格式；后端会在入库前递归兼容并转换旧版客户端传入的 UTC ISO 时间。目录仍使用 `yyyyMMdd/HHmmss`。
+CDP/Runner 执行链路中的开始时间、结束时间、诊断日志时间和响应快照时间统一为北京时间 `yyyy-MM-dd HH:mm:ss`。admin Runner 任务状态以及写入 `AutomationUiSceneDO.debugRecord` 的顶层和 `playwrightResult` 嵌套执行时间使用同一格式；后端会在入库前递归兼容并转换旧版客户端传入的 UTC ISO 时间。admin Runner 目录使用 `yyyyMMdd/executionId`，未传执行 ID 的手工命令仍使用 `yyyyMMdd/HHmmss`。
 
 ## 环境要求
 
@@ -115,7 +115,7 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4173/api/testcases/278/rese
 批量重置成功集合：
 
 ```powershell
-$ids = '278,279,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296'
+$ids = '278,279,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296,297'
 foreach ($id in $ids.Split(',')) {
   Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:4173/api/testcases/$id/reset" | Out-Null
 }
@@ -144,6 +144,7 @@ foreach ($id in $ids.Split(',')) {
 | `294` | 通过 | Monaco 多行输入、`Control+S` 快捷键反馈 |
 | `295` | 通过 | 隐藏上传代理、二进制下载校验 |
 | `296` | 通过 | Runner smoke、Playwright/pytest 导出、storage state 参数化 |
+| `297` | 通过 | 录制语义定位、隐藏 checkbox 到可见组件代理转换 |
 
 相关 fixture：
 
@@ -249,15 +250,15 @@ node src/batch.js --case-ids 278,280 --api-base http://127.0.0.1:4173/api --work
 单用例产物目录：
 
 ```text
-playwright-runner-artifacts/runs/<projectShortName>/<versionName>/<sceneId>/<caseId>/<yyyyMMdd>/<HHmmss>/
+artifacts/runs/<projectShortName>/<versionName>/<sceneId>/<caseId>/<yyyyMMdd>/<executionId>/
 ```
 
-例如：`artifacts/runs/AAS_P/V6.5B06D011/AAS_P_SMOKE_006/SCENE_CASE_001/20260715/180409/`。目录各层来自 admin 用例执行快照，字符会按 Windows 路径规则进行安全处理；`runId` 和 admin API 关联使用业务 `sceneId:caseId`，例如 `AAS_P_SMOKE_006:SCENE_CASE_001`。
+例如：`artifacts/runs/AAS_P/V6.5B06D011/AAS_P_SMOKE_006/SCENE_CASE_001/20260717/20260717180409/`。目录各层来自 admin 用例执行快照，字符会按 Windows 路径规则进行安全处理；末级目录和 `runId` 均使用该用例的执行 ID。
 
 批量产物目录：
 
 ```text
-playwright-runner-artifacts/batches/<batchId>/
+artifacts/batches/<batchId>/
 ```
 
 常用文件：
@@ -277,7 +278,7 @@ playwright-runner-artifacts/batches/<batchId>/
 检查单用例结果：
 
 ```powershell
-Get-Content -Raw playwright-runner-artifacts\runs\<projectShortName>\<versionName>\<sceneId>\<caseId>\<yyyyMMdd>\<HHmmss>\result.json
+Get-Content -Raw artifacts\runs\<projectShortName>\<versionName>\<sceneId>\<caseId>\<yyyyMMdd>\<executionId>\result.json
 ```
 
 重点字段：
@@ -300,8 +301,8 @@ Get-Content -Raw playwright-runner-artifacts\runs\<projectShortName>\<versionNam
 打开 HTML 报告：
 
 ```text
-playwright-runner-artifacts/runs/<projectShortName>/<versionName>/<sceneId>/<caseId>/<yyyyMMdd>/<HHmmss>/report.html
-playwright-runner-artifacts/batches/<batchId>/report.html
+artifacts/runs/<projectShortName>/<versionName>/<sceneId>/<caseId>/<yyyyMMdd>/<executionId>/report.html
+artifacts/batches/<batchId>/report.html
 ```
 
 ## Mock 中台人工操作
@@ -358,6 +359,19 @@ viewport_height
   }
 }
 ```
+
+### 配置实时画面质量
+
+在 admin 的 `Playwright Runner 配置` 中，通过浏览器右侧的 `实时画面质量` 选择质量档位：
+
+| 档位 | 像素倍率 | JPEG 质量 | 截图间隔 | 单帧上限 | 适用场景 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `流畅（1080P，低带宽）` | 1 | 65 | 1000ms | 2MB | 弱网或并发任务 |
+| `高清（推荐）` | 1.5 | 82 | 1000ms | 4MB | 日常执行观察，默认选项 |
+| `超清（4K，高带宽）` | 2 | 85 | 1500ms | 8MB | 大屏查看文字和细节 |
+| `8K（极高资源占用）` | 4 | 90 | 3000ms | 16MB | 临时精细排查，不建议长期启用 |
+
+像素倍率只在 Runner 使用固定 viewport 时生效；有头模式配合 `默认最大化` 时，Playwright 不允许同时设置设备像素倍率，实时画面分辨率由实际浏览器窗口决定。JPEG 只保留在 admin Job 内存中，不写入场景 JSON。
 
 也可以用 API 创建 mock Runner job：
 
@@ -445,6 +459,8 @@ node src/index.js --case-id 278 --api-base http://127.0.0.1:4173/api --headed fa
 | `--project-environment-id` | admin 产品环境 ID；admin 单用例任务必填 | 无 |
 | `--api-base` | API 地址 | `http://127.0.0.1:4173/api` |
 | `--browser` | `chromium`、`firefox`、`webkit` | `chromium` |
+| `--locator-mode` | `legacy` 保持历史行为；`semantic-v1` 对齐录制定位语义 | `legacy` |
+| `--page-error-check-enabled` | 留空继承用例；`true`、`false` 显式覆盖 | 继承用例 |
 | `--headed` | 是否显示浏览器 | `false` |
 | `--ignore-https-errors` | 是否忽略 HTTPS 证书错误 | `false` |
 | `--slow-mo` | Playwright 动作慢放毫秒数，便于人工观察 | `0` |
@@ -454,7 +470,7 @@ node src/index.js --case-id 278 --api-base http://127.0.0.1:4173/api --headed fa
 | `--timeout` | 单步超时毫秒 | `6000` |
 | `--case-timeout` | 总用例超时毫秒；超时会关闭 context/browser 并回传失败 | `600000` |
 | `--start-step` | 从第几个 step 开始 | `0` |
-| `--artifact-dir` | 产物根目录 | `playwright-runner-artifacts` |
+| `--artifact-dir` | 产物根目录 | `artifacts` |
 
 批量入口：
 
@@ -466,8 +482,11 @@ node src/batch.js --case-ids 278,279 --api-base http://127.0.0.1:4173/api --work
 | --- | --- | --- |
 | `--case-ids` | 逗号分隔 case ID | 可由 `CUECAST_CASE_IDS` 提供 |
 | `--workers` | case 级并发数 | `1` |
+| `--session-mode` | `isolated` 隔离执行；`reuse-auth` 串行复用认证状态 | `isolated` |
+| `--storage-state` | 单用例或批次的只读初始 storage state | 空 |
 | `--api-base` | API 地址 | `http://127.0.0.1:4173/api` |
-| `--artifact-dir` | 产物根目录 | `playwright-runner-artifacts` |
+| `--artifact-dir` | 产物根目录 | `artifacts` |
+| `--log-dir` | 本机脱敏结构化诊断日志目录 | `logs` |
 
 常用环境变量：
 
@@ -478,16 +497,42 @@ CUECAST_TOKEN          后端鉴权 token
 CUECAST_PROJECT_ENVIRONMENT_ID admin 产品环境 ID
 CUECAST_STORAGE_STATE  导出脚本或真实环境使用的 storage state 文件
 RUNNER_WORKERS         批量 worker 数
+RUNNER_SESSION_MODE    isolated | reuse-auth
+RUNNER_STORAGE_STATE   单用例或批次的只读初始 storage state 文件
 RUNNER_BROWSER         chromium | firefox | webkit
+RUNNER_LOCATOR_MODE    legacy | semantic-v1
+RUNNER_PAGE_ERROR_CHECK_ENABLED 留空继承用例，true | false 为任务级覆盖
 RUNNER_HEADED          true | false
 RUNNER_TRACE           on | off | retain-on-failure
 RUNNER_VIDEO           on | off | retain-on-failure
 RUNNER_ARTIFACT_DIR    产物根目录
+RUNNER_LOG_DIR         本机脱敏结构化诊断日志目录，默认 logs
 RUNNER_STEP_TIMEOUT_MS 单步超时
 RUNNER_CASE_TIMEOUT_MS 单 case 超时
 ```
 
 优先级：CLI 参数 > 环境变量 > 默认值。
+
+`reuse-auth` 仅允许串行批次（`workers=1`）。它复用 Cookie、localStorage、IndexedDB，以及最终页面同源的 sessionStorage 快照；不复用页面内存或 WebSocket 会话。平台批次的 `--storage-state-out` 只能由 admin 后端注入，认证文件不会进入 artifact、场景记录或前端请求；批次正常完成或取消后会被清理。
+
+如果下一条用例的录制起点仍是 `/login`、`/login1`、`/signin` 等登录路由，Runner 会在同源且上一条成功用例已进入非登录页面时恢复上一条最终业务页。普通业务起点、跨域地址和 `isolated` 模式不应用该规则。
+
+会话复用排查日志位于：
+
+```text
+<runnerRoot>/logs/<projectShortName>/<versionName>/<sceneId>/<caseId>/<yyyyMMdd>/<executionId>.log
+<runnerRoot>/logs/<yyyyMMdd>/session-audit.log
+```
+
+重点检查：
+
+1. `登录态加载=true`，以及 Cookie、localStorage、IndexedDB 条目数量。
+2. `目标域匹配=是`。
+3. 第二条用例出现 `起始页决策=resume-previous-page`。
+4. 页面加载后没有“登录态已加载但页面仍处于登录地址”警告。
+5. `session-audit.log` 出现“登录态候选已原子提升”。
+
+日志不会保存 sessionStorage 键名/值、其他认证值、Token、storage state 内容或路径；URL 也会移除查询参数。第二条用例应先出现“待恢复 sessionStorage”和“已注册 sessionStorage 预加载”，随后导航日志中的 sessionStorage 数量应与候选一致。若数量一致仍回到登录页，目标系统可能依赖页面内存或服务端一次性会话，需要评估后续同一 Page 执行模式。
 
 ## 真实环境接入方式
 
@@ -583,8 +628,10 @@ pytest 编译失败：
 
 定位失败：
 
-- 查看 `result.json` 中的 `locator_source`、`locator_type`、`matched_count`、`visible_count`。
-- 如果错误为 `LOCATOR_AMBIGUOUS`，说明多个可见元素无法收敛，需要补充更强的 `locator_meta.context` 或更精确 selector。
+- 查看 `result.json` 中的 `locator_source`、`locator_type`、`matched_count`、`visible_count` 和 `details.locator_diagnostics`。诊断会列出每种候选的 DOM/可见匹配数、上下文评分、最高分差、归一化规则、loading 暂停时长和最近资源失败。
+- `LOCATOR_NOT_FOUND` 表示所有候选均未命中；`LOCATOR_HIDDEN`、`LOCATOR_DISABLED`、`LOCATOR_COVERED` 分别表示命中但不可见、不可用或被遮挡；`LOCATOR_LOOKUP_ERROR` 表示候选表达式本身执行异常。
+- `LOCATOR_AMBIGUOUS` 表示多个可见元素没有达到高置信自动收敛条件，需要补充更强的 `locator_meta.context` 或更精确 selector，Runner 不会静默选择第一个元素。
+- admin Runner Job 默认使用 `semantic-v1`；手工复现录制定位问题时也要显式增加 `--locator-mode semantic-v1`，否则会走兼容用的 `legacy` 路径。
 
 用例详情页显示成原生 HTML、图标巨大或样式混乱：
 
@@ -600,12 +647,13 @@ pytest 编译失败：
 4. 打开 `http://127.0.0.1:4173/test-lab/` 确认页面可访问。
 5. 执行单用例 `278`。
 6. 执行失败用例 `280`，确认失败产物。
-7. 执行完整成功集合 `278,279,281-296`。
+7. 执行完整成功集合 `278,279,281-297`。
 8. 打开最新 batch 的 `report.html` 和 `summary.json`。
 9. 导出并执行 case `296` 的 Playwright spec。
 10. 导出并编译 case `296` 的 pytest 文件。
 11. 打开 `http://127.0.0.1:4173/testcases/279`，人工点 `Runner 回放` 验证 mock 中台入口。
-12. 根据真实环境清单替换 API、token、storage state，再做小规模真实 case 验证。
+12. 单独执行 case `297` 并确认 `details.locator_diagnostics.normalization_rule` 为 `checkbox-visible-wrapper`。
+13. 根据真实环境清单替换 API、token、storage state，再做小规模真实 case 验证。
 
 ## 当前边界
 

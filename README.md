@@ -52,17 +52,17 @@ SAKURA_PLAYWRIGHT_NODE_COMMAND=node
 SAKURA_PLAYWRIGHT_RUNNER_MAX_CONCURRENT=2
 ```
 
-admin 仅负责定位并启动 Runner、限制并发、注入当前登录用户的短期 Bearer Token。所有回放运行参数统一配置在 `.env`：`CUECAST_API_BASE`、`CUECAST_ADMIN_API`、浏览器、无头模式、HTTPS 证书策略、超时、产物目录、trace/video 等。admin 服务节点需要满足 Node.js、Runner 依赖和 Playwright 浏览器已安装。
+admin 仅负责定位并启动 Runner、限制并发、注入当前登录用户的短期 Bearer Token。服务地址、产物目录等节点参数配置在 `.env`；浏览器、无头模式、实时画面质量、HTTPS 证书策略、超时和 trace/video 策略由平台任务白名单参数覆盖。admin 服务节点需要满足 Node.js、Runner 依赖和 Playwright 浏览器已安装。
 
 ### 启动检查与故障定位
 
 修改 admin 后端或前端代码后必须重启 admin 后端并重新发布前端；旧进程访问 `/api/automation/playwright/runner/jobs` 返回 `404`，说明 Runner Controller 尚未加载，不是 Playwright 用例动作失败。
 
-回放方式和产物策略以 `.env` 为准。任务完成后点击页面上的“查看日志”，重点检查 `runnerRoot`、`runnerConfig`、HTTP 状态码、定位器错误和结果回传错误；任务结束行的 `artifacts=` 是本次实际产物目录。
+执行期间可在 admin 执行历史中打开“日志”和“实时画面”：日志按任务轮询增量刷新，实时画面每秒读取受鉴权的最新 JPEG；任务结束后日志回退到 `execution-log.json` artifact，最后一帧仅在 Job 内存中短暂保留且不会写入场景 JSON。任务结束行的 `artifacts=` 是本次实际产物目录。
 
-单用例产物按 `runs/<projectShortName>/<versionName>/<sceneId>/<caseId>/<yyyyMMdd>/<HHmmss>/` 分层保存，例如 `artifacts/runs/AAS_P/V6.5B06D011/AAS_P_SMOKE_006/SCENE_CASE_001/20260715/180409/`。各层目录会过滤 Windows 非法文件名字符；`runId` 和 admin API 使用业务 `sceneId:caseId`，例如 `AAS_P_SMOKE_006:SCENE_CASE_001`。
+admin 单用例产物按 `runs/<projectShortName>/<versionName>/<sceneId>/<caseId>/<yyyyMMdd>/<executionId>/` 分层保存，例如 `artifacts/runs/AAS_P/V6.5B06D011/AAS_P_SMOKE_006/SCENE_CASE_001/20260717/20260717180409/`。末级目录与执行历史中的用例执行 ID 完全一致；未传 `--run-id` 的旧 CLI 仍使用 `yyyyMMdd/HHmmss`。各层目录都会过滤 Windows 非法文件名字符。
 
-CDP/Runner 的执行开始、结束、诊断和快照时间统一使用北京时间 `yyyy-MM-dd HH:mm:ss`；admin 任务状态及写入场景 `debugRecord/playwrightResult` 的时间采用相同格式。历史 ISO 时间仍可读取并在展示、再次入库时转换，目录时间继续使用 `yyyyMMdd/HHmmss`。
+CDP/Runner 的执行开始、结束、诊断和快照时间统一使用北京时间 `yyyy-MM-dd HH:mm:ss`；admin 任务状态及写入场景 `debugRecord/playwrightResult` 的时间采用相同格式。历史 ISO 时间仍可读取并在展示、再次入库时转换；admin Runner 目录使用 `yyyyMMdd/executionId`。
 
 Runner 访问 admin 用例时使用 `/testcases/{sceneId}/{caseId}` 双路径形式，避免 `sceneId:caseId` 的冒号经过网关编码后无法匹配 Spring 路由。
 
@@ -118,7 +118,7 @@ node src/index.js --case-id 278 --api-base http://127.0.0.1:4173/api --headed fa
 产物默认生成在：
 
 ```text
-playwright-runner-artifacts/runs/<projectShortName>/<versionName>/<sceneId>/<caseId>/<yyyyMMdd>/<HHmmss>/
+playwright-runner-artifacts/runs/<projectShortName>/<versionName>/<sceneId>/<caseId>/<yyyyMMdd>/<executionId>/
 ```
 
 重点查看：
@@ -162,7 +162,7 @@ node src/index.js --case-id 280 --api-base http://127.0.0.1:4173/api --headed fa
 
 M3 增加本地报告和 mock 中台 Runner 回放能力：
 
-- 每次 Runner 执行都会生成 `report.html` 和 `logs/console.json`。
+- 每次 Runner 执行都会生成 `report.html`、浏览器控制台事件 `logs/console.json` 和平台执行日志 `logs/execution-log.json`。
 - 失败用例在 `--trace retain-on-failure --video retain-on-failure` 下会保留 `trace.zip`、`.webm`、`failure.png`、`failure.html` 和 DOM 文本快照。
 - test-lab 页面提供 `Runner 回放` 按钮，通过 mock API 创建异步 Runner job。
 - 执行历史可展开 `Runner report`，查看失败步骤、定位来源和 artifact 链接。
@@ -205,10 +205,16 @@ npm run run:batch -- --case-ids 278,279 --api-base http://127.0.0.1:4173/api --w
 
 - `--case-ids` 支持逗号分隔的多个 case，例如 `278,279,280`。
 - `--workers` 默认 `1`，表示串行执行；大于 `1` 时按 case 级别有限并发。
-- 每个 case 仍复用单用例 Runner 流程，并独立生成 `playwright-runner-artifacts/runs/<projectShortName>/<versionName>/<sceneId>/<caseId>/<yyyyMMdd>/<HHmmss>/`。
+- `--session-mode isolated` 为默认隔离模式；`--session-mode reuse-auth` 会把上一条成功用例的 Cookie、localStorage、IndexedDB 和最终页面同源 sessionStorage 快照提供给下一条用例。
+- `reuse-auth` 会记录上一条成功用例的最终同源业务页；下一条录制起点仍是 `/login`、`/login1`、`/signin` 等登录路由时，优先恢复该业务页，避免加载状态后又被固定起点覆盖回登录页面。
+- `reuse-auth` 必须带批次标识且强制 `--workers 1`；失败或取消用例不覆盖上一份成功状态，批次退出时删除临时状态目录。
+- `--storage-state`/`RUNNER_STORAGE_STATE`/`CUECAST_STORAGE_STATE` 可作为单用例只读初始状态；批次候选输出路径只应由平台后端传入。
+- 每个 case 仍复用单用例 Runner 流程；admin 批次会独立生成 `playwright-runner-artifacts/runs/<projectShortName>/<versionName>/<sceneId>/<caseId>/<yyyyMMdd>/<executionId>/`。
 - 批量汇总生成在 `playwright-runner-artifacts/batches/<batchId>/`。
 - 批量产物包含 `summary.json` 和 `report.html`。
 - 全部通过时退出码为 `0`；任意失败时退出码非 `0`。
+
+Runner 会把脱敏结构化日志写入 `logs/<yyyyMMdd>/<jobId-or-runId-or-caseId>-<pid>.log`，服务端状态提交和清理写入同日期的 `session-audit.log`。日志只包含认证存储条目数量、sessionStorage 预加载数量、目标域匹配和导航/提交决策，不包含 Cookie、Token、存储键名/值、状态文件内容或路径。可用 `RUNNER_LOG_DIR` 或 `--log-dir` 修改目录。
 
 本地成功批量验证：
 
@@ -757,6 +763,23 @@ python -m py_compile playwright-runner-artifacts/exports/test_case_296_m5o_stora
 - 导出的 pytest smoke 文件可通过 `python -m py_compile`。
 - 导出文件包含 `CUECAST_START_URL`、`CUECAST_API_BASE`、`CUECAST_STORAGE_STATE` 参数入口。
 
+## 录制定位语义对齐
+
+Runner 提供两种定位模式：
+
+- `legacy`：保持历史 CLI 和 Jenkins 默认行为，只使用既有 Playwright 定位链路。
+- `semantic-v1`：按 CueCast 录制语义消费完整 `locator_meta.candidates` 和 `locator_meta.context`，轮询候选、按上下文评分收敛，并把隐藏 checkbox/radio、SVG、combobox 等原生节点规范化为可交互代理元素。admin 创建的 Runner Job 会显式使用该模式。
+
+`semantic-v1` 只有在最高候选达到高置信阈值且与第二名有足够分差时才自动选择；否则返回 `LOCATOR_AMBIGUOUS`，不静默点击第一个元素。定位失败进一步区分 `LOCATOR_NOT_FOUND`、`LOCATOR_HIDDEN`、`LOCATOR_DISABLED`、`LOCATOR_COVERED` 和 `LOCATOR_LOOKUP_ERROR`。每一步的 `details.locator_diagnostics` 会记录候选尝试、DOM/可见匹配数、评分、归一化规则、等待时间和最近资源失败。
+
+页面错误检测支持三态策略：任务不传值时继承用例的 `page_error_check_enabled`；任务显式传 `true` 或 `false` 时覆盖用例。加载态暂停逻辑超时计时，但保留 180 秒墙钟上限，避免页面永久 loading 导致任务不结束。
+
+本地语义回归 case `297` 覆盖隐藏原生 checkbox 到可见组件代理的转换：
+
+```powershell
+node src/index.js --case-id 297 --api-base http://127.0.0.1:4173/api --headed false --locator-mode semantic-v1 --trace off --video off
+```
+
 ## 环境变量
 
 CLI 参数优先级高于环境变量，环境变量优先级高于默认值。
@@ -766,7 +789,11 @@ CUECAST_CASE_IDS       批量 case ID，例如 278,279
 CUECAST_API_BASE       后端 API 地址
 CUECAST_TOKEN          后端鉴权 token
 RUNNER_WORKERS         批量 worker 数，默认 1
+RUNNER_SESSION_MODE    isolated | reuse-auth，默认 isolated
+RUNNER_STORAGE_STATE   单用例或批次的只读初始 storage state 文件
 RUNNER_BROWSER         chromium | firefox | webkit，默认 chromium
+RUNNER_LOCATOR_MODE    legacy | semantic-v1，默认 legacy
+RUNNER_PAGE_ERROR_CHECK_ENABLED 留空继承用例，true | false 为任务级覆盖
 RUNNER_HEADED          true | false，默认 false
 RUNNER_TRACE           on | off | retain-on-failure，批量默认 retain-on-failure
 RUNNER_VIDEO           on | off | retain-on-failure，批量默认 retain-on-failure
@@ -797,6 +824,8 @@ admin 默认允许单文件 200MB；视频超过限制时应缩短用例、改�
 --case-id       用例 ID，必填
 --api-base      后端 API 地址，默认 http://127.0.0.1:4173/api
 --browser       chromium | firefox | webkit，默认 chromium
+--locator-mode  legacy | semantic-v1，默认 legacy
+--page-error-check-enabled 留空继承用例，true | false 为任务级覆盖
 --headed        是否显示浏览器，默认 false
 --slow-mo       Playwright 动作慢放毫秒数，默认 0
 --finish-delay  执行结束后关闭浏览器前停留毫秒数，默认 0

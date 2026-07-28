@@ -25,7 +25,7 @@ function parseExportArgs(argv = process.argv.slice(2), env = process.env) {
     apiBase: trimTrailingSlash(args['api-base'] || mergedEnv.CUECAST_API_BASE || 'http://127.0.0.1:4173/api'),
     token: args.token || mergedEnv.CUECAST_TOKEN || '',
     output: args.output ? path.resolve(process.cwd(), args.output) : '',
-    artifactDir: args['artifact-dir'] || mergedEnv.RUNNER_ARTIFACT_DIR || 'playwright-runner-artifacts',
+    artifactDir: args['artifact-dir'] || mergedEnv.RUNNER_ARTIFACT_DIR || 'artifacts',
     storageState: args['storage-state'] || mergedEnv.CUECAST_STORAGE_STATE || mergedEnv.RUNNER_STORAGE_STATE || '',
   };
 }
