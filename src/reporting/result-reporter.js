@@ -27,6 +27,7 @@ export function createRunResult({ config, artifacts, startedAt }) {
     },
     raw: {
       project_environment_id: config.projectEnvironmentId || '',
+      execution_id: config.executionId || '',
       session_mode: config.sessionMode,
       auth_state_loaded: false,
       auth_state_saved: false,

@@ -36,6 +36,7 @@ test('platform CLI options override runner environment defaults', () => {
     '--batch-id', 'BATCH-20260717-0001',
     '--run-id', 'RUN-20260717-0001',
     '--job-id', 'JOB-20260717-0001',
+    '--execution-id', 'EXEC-20260717-0001',
     '--project-environment-id', '47',
     '--headed', 'true',
     '--ignore-https-errors', 'false',
@@ -54,6 +55,7 @@ test('platform CLI options override runner environment defaults', () => {
   assert.equal(config.batchId, 'BATCH-20260717-0001');
   assert.equal(config.runId, 'RUN-20260717-0001');
   assert.equal(config.jobId, 'JOB-20260717-0001');
+  assert.equal(config.executionId, 'EXEC-20260717-0001');
   assert.equal(config.headed, true);
   assert.equal(config.ignoreHttpsErrors, false);
   assert.equal(config.liveFrameQuality, 'high');
@@ -237,6 +239,34 @@ test('admin case request includes the selected project environment', async () =>
       requestedUrl,
       'http://127.0.0.1:8000/automation/playwright/testcases/AAS_P_SMOKE_006/SCENE_CASE_001?projectEnvironmentId=47',
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('infrastructure task requests carry only execution identity and use the admin task endpoints', async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (url, options = {}) => {
+    requests.push({ url: String(url), options });
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ code: 0, data: { task_id: 'INFRA_001', status: 'queued' } }),
+    };
+  };
+  try {
+    const client = new ApiClient({ apiBase: 'http://127.0.0.1:8000', adminApi: true, token: 'runner-token' });
+    await client.createInfrastructureTask({ jobId: 'JOB_001', stepId: 'STEP_001' });
+    await client.getInfrastructureTask('INFRA_001', 12);
+    await client.cancelInfrastructureTask('INFRA_001', 'case_timeout');
+
+    assert.equal(requests[0].url, 'http://127.0.0.1:8000/automation/infrastructure/tasks');
+    assert.deepEqual(JSON.parse(requests[0].options.body), { jobId: 'JOB_001', stepId: 'STEP_001' });
+    assert.equal(requests[1].url, 'http://127.0.0.1:8000/automation/infrastructure/tasks/INFRA_001?afterSequence=12');
+    assert.equal(requests[2].options.method, 'DELETE');
+    assert.deepEqual(JSON.parse(requests[2].options.body), { reason: 'case_timeout' });
+    assert.equal(requests[0].options.headers.Authorization, 'Bearer runner-token');
   } finally {
     globalThis.fetch = originalFetch;
   }

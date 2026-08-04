@@ -1,4 +1,5 @@
 import { RunnerError } from '../shared/utils.js';
+import { hasBrowserSteps } from './infrastructure-step-runner.js';
 
 export function normalizeCase(testCase, options = {}) {
   if (!testCase || typeof testCase !== 'object') {
@@ -6,7 +7,7 @@ export function normalizeCase(testCase, options = {}) {
   }
   const steps = normalizeSteps(testCase.steps || [], options.startStep || 0);
   const startUrl = String(testCase.start_url || steps[0]?.url || '').trim();
-  if (!startUrl) {
+  if (hasBrowserSteps(steps) && !startUrl) {
     throw new RunnerError('CASE_INVALID', 'Test case start_url is missing');
   }
   return {
@@ -20,6 +21,9 @@ export function normalizeCase(testCase, options = {}) {
 export function normalizeSteps(rawSteps, startStep = 0) {
   const steps = (Array.isArray(rawSteps) ? rawSteps : [])
     .map((step, index) => ({
+      // 基础设施步骤的 target_ref、SQL 参数和原生数据库操作由 Runner 原样保留。
+      // 它们的实际命令与凭据仍只在服务端冻结快照中解析，不由此处生成或补全。
+      ...step,
       id: step.id ?? index + 1,
       original_step_id: step.original_step_id ?? null,
       step_index: Number.isInteger(Number(step.step_index)) ? Number(step.step_index) : index,

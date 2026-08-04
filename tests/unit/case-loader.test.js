@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { normalizeSteps } from '../../src/runner/case-loader.js';
+import { normalizeCase, normalizeSteps } from '../../src/runner/case-loader.js';
 
 test('duplicate source step ids receive stable unique execution ids', () => {
   const steps = normalizeSteps([
@@ -30,4 +30,23 @@ test('admin execution id keeps the original recorded id for result tracing', () 
 
   assert.equal(steps[0].id, 'CASE_STEP_005');
   assert.equal(steps[0].original_step_id, 1);
+});
+
+test('infrastructure-only cases do not require a browser start_url and retain execution fields', () => {
+  const testCase = normalizeCase({
+    id: 'SCENE:CASE',
+    steps: [{
+      id: 'STEP_SQL',
+      action_type: 'database_sql',
+      sql_mode: 'update',
+      sql: 'UPDATE user SET password = ?',
+      parameters: [{ jdbc_type: 'VARCHAR', value_ref: 'secret.password' }],
+      target_ref: { kind: 'database', binding_key: 'audit-db' },
+    }],
+  });
+
+  assert.equal(testCase.start_url, '');
+  assert.equal(testCase.steps[0].sql_mode, 'update');
+  assert.equal(testCase.steps[0].parameters[0].value_ref, 'secret.password');
+  assert.deepEqual(testCase.steps[0].target_ref, { kind: 'database', binding_key: 'audit-db' });
 });

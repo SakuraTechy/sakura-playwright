@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium, firefox, webkit } from 'playwright';
@@ -7,7 +8,10 @@ import { ApiClient } from './api/api-client.js';
 import { normalizeCase, resolveViewport, shouldLaunchMaximized } from './runner/case-loader.js';
 import { resolveLiveFrameQualityPreset, startLiveFramePublisher } from './runner/live-frame-publisher.js';
 import { LOADING_WAIT_WALL_MS, resolvePageErrorCheckEnabled } from './runner/page-state-diagnostics.js';
-import { runStep } from './runner/step-runner.js';
+import { createBrowserActionContext, runStep } from './runner/step-runner.js';
+import { createInfrastructureTaskCancellation, hasBrowserSteps } from './runner/infrastructure-step-runner.js';
+import { createVariableContext } from './runner/variable-context.js';
+import { getPlaywrightCapabilities } from './runner/action-registry.js';
 import {
   captureSessionStorage,
   isLikelyAuthenticationUrl,
@@ -66,6 +70,7 @@ async function main() {
     adminApi: config.adminApi,
     projectEnvironmentId: config.projectEnvironmentId,
   });
+  const infrastructureTasks = createInfrastructureTaskCancellation(api, executionLogger);
   let artifacts;
   let result;
 
@@ -75,6 +80,8 @@ async function main() {
   let activePage;
   let liveFramePublisher;
   let actionPreviewWarningReported = false;
+  const browserActionContext = createBrowserActionContext({ defaultTimeoutMs: config.timeoutMs });
+  let variableContext;
   const consoleEvents = [];
   const networkEvents = [];
   let caseTimedOut = false;
@@ -85,6 +92,7 @@ async function main() {
     `浏览器=${config.browser}，headed=${config.headed}，实时画面=${config.liveFrameQuality}，trace=${config.trace}，video=${config.video}，步骤超时=${config.timeoutMs}ms`,
     true,
   );
+  await registerOperationCatalogCapabilities(api, executionLogger, config);
 
   try {
     await withTimeout((async () => {
@@ -92,6 +100,8 @@ async function main() {
     const testCaseRaw = await api.getTestCase(config.caseId);
     if (caseTimedOut) throw new RunnerError('CASE_TIMEOUT', `Case execution timed out after ${config.caseTimeoutMs}ms`);
     const testCase = normalizeCase(testCaseRaw, { caseId: config.caseId, startStep: config.startStep });
+    variableContext = createVariableContext(testCase.initial_variables || testCase.initialVariables || {});
+    const containsBrowserSteps = hasBrowserSteps(testCase.steps);
     config.pageErrorCheckEnabled = resolvePageErrorCheckEnabled(config.pageErrorCheckEnabled, testCase);
     executionLogger.success('case', `用例加载完成，共 ${testCase.steps.length} 个步骤`);
     executionLogger.info(
@@ -116,6 +126,10 @@ async function main() {
     result = createRunResult({ config, artifacts, startedAt });
     attachCaseInfo(result, testCase);
 
+    result.raw.contains_browser_steps = containsBrowserSteps;
+    result.raw.contains_infrastructure_steps = testCase.steps.some((step) => !hasBrowserSteps([step]));
+
+    if (containsBrowserSteps) {
     const launchArgs = [];
     if (shouldLaunchMaximized(testCase, { headed: config.headed })) {
       launchArgs.push('--start-maximized');
@@ -256,22 +270,35 @@ async function main() {
       intervalMs: liveFramePreset.intervalMs,
       jpegQuality: liveFramePreset.jpegQuality,
     });
+    } else {
+      result.raw.runner_log_file = path.relative(process.cwd(), localLogPath);
+      result.raw.session_navigation_reason = 'not-required-for-infrastructure-only-case';
+      executionLogger.info('infrastructure', '用例仅包含基础设施步骤，不启动 Playwright 浏览器');
+    }
     for (let stepPosition = 0; stepPosition < testCase.steps.length; stepPosition += 1) {
       const step = testCase.steps[stepPosition];
       const nextStep = testCase.steps[stepPosition + 1];
+      // 执行前生成运行时副本，绝不能把变量替换结果写回 Admin 获取的原始 case snapshot。
+      const runtimeBindings = variableContext.bindingsForStep(step);
+      const runtimeStep = variableContext.resolveStep(step);
+      // 只有下拉输入和弹窗预注册会读取下一步骤；不要提前解析普通下一步，
+      // 否则“当前写变量、下一步读变量”会在写入前错误失败。
+      const runtimeNextStep = requiresResolvedNextStep(runtimeStep, nextStep)
+        ? variableContext.resolveStep(nextStep)
+        : nextStep;
       const stepStartedAt = Date.now();
       const stepLogLabel = formatStepLogLabel(step);
       executionLogger.info('step', `${stepLogLabel}，开始执行`);
       executionLogger.info('step', `${stepLogLabel}，动作类型=${step.action_type || 'custom'}`, true);
       try {
-        const stepResult = await withTimeout(runStep(activePage, testCase, step, {
+        const stepResult = await withTimeout(runStep(activePage, testCase, runtimeStep, {
           timeoutMs: config.timeoutMs,
           locatorMode: config.locatorMode,
           locatorWallTimeoutMs: LOADING_WAIT_WALL_MS,
           pageErrorCheckEnabled: config.pageErrorCheckEnabled,
           // 录制的 Element Select 搜索输入与选项点击是两个连续步骤；
           // Runner 需要看到下一步才能保持下拉层打开并复现原始语义。
-          nextStep,
+          nextStep: runtimeNextStep,
           artifacts,
           apiBase: config.apiBase,
           networkEvents,
@@ -292,13 +319,34 @@ async function main() {
             actionPreviewWarningReported = true;
             executionLogger.warning('live', `动作可视化暂不可用：${error?.message || String(error)}`);
           },
+          api,
+          browserContext: browserActionContext,
+          variableContext,
+          runtimeBindings,
+          infrastructureExecution: {
+            jobId: config.jobId,
+            batchId: config.batchId,
+            executionId: config.executionId,
+            caseKey: testCase.id || config.caseId,
+            projectEnvironmentId: config.projectEnvironmentId,
+            definitionVersion: testCase.definition_version || testCase.definitionVersion || '',
+          },
+          infrastructureTasks,
+          infrastructurePollIntervalMs: config.infrastructurePollIntervalMs,
+          onInfrastructureLog: (event) => {
+            const level = String(event.level || 'info').toLowerCase();
+            const message = String(event.message || event.text || '基础设施任务状态已更新');
+            const logMethod = level === 'error' ? 'error' : level === 'warn' || level === 'warning' ? 'warning' : 'info';
+            executionLogger[logMethod]('infrastructure', `任务 ${event.taskId}：${message}`, true);
+          },
         }), (config.locatorMode === 'semantic-v1' ? LOADING_WAIT_WALL_MS : config.timeoutMs)
           + Math.max(0, step.wait_before), `Step ${step.step_index}`);
-        if (stepResult._activePage) {
+        if (Object.prototype.hasOwnProperty.call(stepResult, '_activePage')) {
           activePage = stepResult._activePage;
           delete stepResult._activePage;
-          if (config.headed) await activePage.bringToFront().catch(() => {});
+          if (config.headed && activePage) await activePage.bringToFront().catch(() => {});
         }
+        applyInfrastructureVariables(runtimeStep, stepResult, variableContext);
         result.steps.push(stepResult);
         executionLogger.success(
           'step',
@@ -326,11 +374,13 @@ async function main() {
       code: 'CASE_TIMEOUT',
       onTimeout: async () => {
         caseTimedOut = true;
+        await infrastructureTasks.cancelActive('case_timeout');
         if (context) await context.close().catch(() => {});
         if (browser) await browser.close().catch(() => {});
       },
     });
   } catch (error) {
+    await infrastructureTasks.cancelActive('runner_failed');
     artifacts ||= await createRunArtifacts({
       artifactDir: config.artifactDir,
       caseId: config.caseId,
@@ -573,6 +623,55 @@ function attachNetworkRecorder(page, events) {
       headers: request.headers(),
       timestamp: formatPlatformDateTime(),
     });
+  });
+}
+
+async function registerOperationCatalogCapabilities(api, executionLogger, config) {
+  if (!api.adminApi || typeof api.registerOperationCapabilities !== 'function') return;
+
+  const capabilities = getPlaywrightCapabilities({
+    executorInstanceId: process.env.SAKURA_PLAYWRIGHT_EXECUTOR_INSTANCE_ID || os.hostname(),
+    projectEnvironmentId: config.projectEnvironmentId,
+    features: ['browser'],
+  });
+  try {
+    await api.registerOperationCapabilities(capabilities);
+    executionLogger.info(
+      'capability',
+      `已上报 Playwright Runner 能力，版本=${capabilities.executorVersion}，action=${capabilities.actions.length}`,
+      true,
+    );
+  } catch (error) {
+    // 旧 Admin 尚未提供能力目录接口时不能阻断现有执行、报告和 Jenkins 链路。
+    executionLogger.warning(
+      'capability',
+      `能力目录上报未完成，将继续执行：${error?.message || String(error)}`,
+    );
+  }
+}
+
+function requiresResolvedNextStep(step, nextStep) {
+  if (!nextStep) return false;
+  const action = String(step?.action_type || '').trim().toLowerCase();
+  if (action === 'input') return true;
+  const nextAction = String(nextStep.action_type || '').trim().toLowerCase();
+  return ['dialog_accept', 'dialog_dismiss', 'dialog_prompt'].includes(nextAction);
+}
+
+/**
+ * Agent 的变量结果不能进入报告或日志；只接受当前步骤显式声明的变量名。
+ * 这使数据库查询、文件查找和节点信息可供后续步骤使用，同时避免 Agent 返回任意键污染用例上下文。
+ */
+function applyInfrastructureVariables(step, stepResult, variableContext) {
+  const variables = stepResult._runtime_variables;
+  delete stepResult._runtime_variables;
+  if (!variables || typeof variables !== 'object') return;
+  const variableName = String(step?.variable_name || step?.result_binding || '').trim();
+  if (!variableName || !Object.prototype.hasOwnProperty.call(variables, variableName)) return;
+  variableContext.set(variableName, variables[variableName], {
+    masked: step?.value_masked === true || step?.value_masked === 'true' || step?.value_masked === 1 || step?.value_masked === '1',
+    overwrite: step?.overwrite !== false && step?.overwrite !== 'false',
+    source: 'infrastructure',
   });
 }
 

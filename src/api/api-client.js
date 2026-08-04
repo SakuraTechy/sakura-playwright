@@ -40,7 +40,14 @@ export class ApiClient {
         const payload = await res.json().catch(() => null);
         if (!res.ok) {
           if (res.status === 404 && index < bases.length - 1) continue;
-          throw new RunnerError('INFRA_API_FAILED', `API ${method} ${path} failed with HTTP ${res.status}`, { payload });
+          const message = payload?.message || payload?.msg || payload?.error;
+          throw new RunnerError(
+            'INFRA_API_FAILED',
+            message
+              ? `${message}（HTTP状态=${res.status}，接口=${method} ${path}）`
+              : `接口调用失败：${method} ${path}，HTTP状态=${res.status}`,
+            { payload },
+          );
         }
         const success = payload && (payload.success === true || payload.code === 0 || payload.code === '0');
         if (!success) {
@@ -76,6 +83,47 @@ export class ApiClient {
       ? `/automation/playwright/testcases/${encodeAdminCasePath(caseId)}/results`
       : `/testcases/${encodeURIComponent(caseId)}/results`;
     const res = await this.request('POST', path, result);
+    return res.data;
+  }
+
+  async createInfrastructureTask(task) {
+    this.requireAdminApi('create infrastructure task');
+    const res = await this.request('POST', '/automation/infrastructure/tasks', task);
+    return res.data;
+  }
+
+  async getInfrastructureTask(taskId, afterSequence = -1) {
+    this.requireAdminApi('get infrastructure task');
+    const query = Number.isFinite(Number(afterSequence)) && Number(afterSequence) >= 0
+      ? `?afterSequence=${encodeURIComponent(afterSequence)}`
+      : '';
+    const res = await this.request('GET', `/automation/infrastructure/tasks/${encodeURIComponent(taskId)}${query}`);
+    return res.data;
+  }
+
+  async cancelInfrastructureTask(taskId, reason = 'runner_cancelled') {
+    this.requireAdminApi('cancel infrastructure task');
+    const res = await this.request(
+      'DELETE',
+      `/automation/infrastructure/tasks/${encodeURIComponent(taskId)}`,
+      { reason },
+    );
+    return res.data;
+  }
+
+  async registerOperationCapabilities(capabilities) {
+    // test-lab 和旧接口没有能力目录；非 Admin 模式保持纯本地回放行为，不发额外请求。
+    if (!this.adminApi) return null;
+    // Admin DTO 使用 SnakeCaseStrategy；注册表内部仍维持 JavaScript 的 camelCase。
+    const payload = {
+      executor_instance_id: capabilities?.executorInstanceId,
+      executor_version: capabilities?.executorVersion,
+      catalog_version: capabilities?.catalogVersion,
+      project_environment_id: capabilities?.projectEnvironmentId || this.projectEnvironmentId,
+      actions: capabilities?.actions,
+      features: capabilities?.features || [],
+    };
+    const res = await this.request('POST', '/automation/operation-catalog/capabilities/playwright', payload);
     return res.data;
   }
 
@@ -154,6 +202,12 @@ export class ApiClient {
       throw error;
     } finally {
       clearTimeout(timer);
+    }
+  }
+
+  requireAdminApi(operation) {
+    if (!this.adminApi) {
+      throw new RunnerError('INFRASTRUCTURE_UNAVAILABLE', `Cannot ${operation} without --admin-api`);
     }
   }
 }

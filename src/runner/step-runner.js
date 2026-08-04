@@ -5,17 +5,71 @@ import { parseLocatorMeta, resolveLocator } from './locator-resolver.js';
 import { isOverlayStep } from './semantic-locator-resolver.js';
 import { showStepAction } from './action-visualizer.js';
 import { collectPageSummary, throwIfPageError } from './page-state-diagnostics.js';
+import { isInfrastructureStep, runInfrastructureStep } from './infrastructure-step-runner.js';
+import { isPlaywrightActionSupported, normalizeActionType } from './action-registry.js';
+import { isLocalVariableAction, runLocalVariableAction } from './global-variable-actions.js';
 import { formatPlatformDateTime, RunnerError, sleep } from '../shared/utils.js';
 
 export async function runStep(page, testCase, step, options = {}) {
   const startedAt = Date.now();
+  options = resolveBrowserActionOptions(options);
   if (step.wait_before > 0) await sleep(step.wait_before);
+  const action = normalizeActionType(step.action_type);
 
-  const action = String(step.action_type || '').toLowerCase();
+  // 基础设施动作不能经过页面错误检测、locator 或 Playwright 可视化；
+  // 它们由服务端按冻结步骤和环境绑定创建受控任务。
+  if (isInfrastructureStep(step)) {
+    const result = await runInfrastructureStep(testCase, step, options);
+    return {
+      ...result,
+      duration_ms: result.duration_ms ?? Date.now() - startedAt,
+    };
+  }
+
+  if (isLocalVariableAction(action)) {
+    if (!isPlaywrightActionSupported(action)) {
+      throw new RunnerError('UNSUPPORTED_STEP', `Unsupported action_type: ${step.action_type}`, { action_type: step.action_type });
+    }
+    const localResult = await runLocalVariableAction(page, step, options);
+    const variable = localResult.variable || {};
+    const locatorInfo = localResult.locatorInfo;
+    await sleep(options.afterStepDelayMs ?? 0);
+    return {
+      step_index: step.step_index,
+      step_id: step.id,
+      ...(step.original_step_id != null ? { original_step_id: step.original_step_id } : {}),
+      action_type: action,
+      status: 'passed',
+      duration_ms: Date.now() - startedAt,
+      ...(variable.variable_name ? {
+        variable_name: variable.variable_name,
+        value_masked: variable.value_masked,
+        ...(variable.value_preview != null ? { value_preview: variable.value_preview } : {}),
+      } : {}),
+      ...(locatorInfo ? {
+        locator_source: locatorInfo.source || '',
+        locator_type: locatorInfo.locatorType || '',
+        locator_value: locatorInfo.locatorValue || '',
+        matched_count: locatorInfo.matchedCount ?? null,
+        visible_count: locatorInfo.visibleCount ?? null,
+      } : {}),
+    };
+  }
+
+  if (action === 'captcha_ocr') {
+    return runCaptchaOcr(page, testCase, step, options, startedAt);
+  }
+
+  if (!isPlaywrightActionSupported(action)) {
+    throw new RunnerError('UNSUPPORTED_STEP', `Unsupported action_type: ${step.action_type}`, { action_type: step.action_type });
+  }
   let locatorInfo = null;
   let extra = {};
 
   await throwIfPageError(page, options.pageErrorCheckEnabled);
+  if (!isDialogAction(action)) {
+    armNextDialogAction(page, options.nextStep, options);
+  }
 
   switch (action) {
     case 'navigate': {
@@ -23,70 +77,178 @@ export async function runStep(page, testCase, step, options = {}) {
       if (!url) throw new RunnerError('CASE_INVALID', 'navigate step has no URL');
       await showStepAction(page, step, null, options);
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: options.timeoutMs });
+      resetActiveFrame(options);
       break;
     }
 
     case 'click': {
-      locatorInfo = await resolveLocator(page, step, options);
+      locatorInfo = await resolveStepLocator(page, step, options);
       await showStepAction(page, step, locatorInfo.locator, options);
       await runLocatorAction(page, locatorInfo, options, () => locatorInfo.locator.click({ timeout: options.timeoutMs }));
       break;
     }
 
     case 'click_open_page': {
-      locatorInfo = await resolveLocator(page, step, options);
+      locatorInfo = await resolveStepLocator(page, step, options);
       await showStepAction(page, step, locatorInfo.locator, options);
       extra = await runLocatorAction(page, locatorInfo, options, () => clickOpenPage(page, locatorInfo.locator, options));
+      resetActiveFrame(options);
       break;
     }
 
     case 'switch_page': {
       await showStepAction(page, step, null, options);
       extra = await switchPage(page, step.value, options);
+      resetActiveFrame(options);
       break;
     }
 
     case 'close_page': {
       await showStepAction(page, step, null, options);
       extra = await closePage(page, step.value, options);
+      resetActiveFrame(options);
+      break;
+    }
+
+    case 'close_all_pages': {
+      await showStepAction(page, step, null, options);
+      extra = await closeAllPages(page, options);
+      resetActiveFrame(options);
+      break;
+    }
+
+    case 'reload': {
+      await showStepAction(page, step, null, options);
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: options.timeoutMs });
+      resetActiveFrame(options);
+      extra = { reloaded: true };
+      break;
+    }
+
+    case 'frame_switch': {
+      const frameResult = await switchFrame(page, step, options);
+      locatorInfo = frameResult.locatorInfo;
+      extra = frameResult.extra;
+      break;
+    }
+
+    case 'frame_parent': {
+      extra = switchToParentFrame(page, options);
+      break;
+    }
+
+    case 'frame_main': {
+      extra = switchToMainFrame(options);
+      break;
+    }
+
+    case 'evaluate': {
+      await showStepAction(page, step, null, options);
+      const result = await executeBrowserScript(getActionRoot(page, options), scriptFromStep(step, 'evaluate'));
+      extra = { evaluated: true, evaluation_result_type: valueType(result) };
       break;
     }
 
     case 'double_click': {
-      locatorInfo = await resolveLocator(page, step, options);
+      locatorInfo = await resolveStepLocator(page, step, options);
       await showStepAction(page, step, locatorInfo.locator, options);
       await runLocatorAction(page, locatorInfo, options, () => locatorInfo.locator.dblclick({ timeout: options.timeoutMs }));
       break;
     }
 
     case 'right_click': {
-      locatorInfo = await resolveLocator(page, step, options);
+      locatorInfo = await resolveStepLocator(page, step, options);
       await showStepAction(page, step, locatorInfo.locator, options);
       await runLocatorAction(page, locatorInfo, options, () => locatorInfo.locator.click({ button: 'right', timeout: options.timeoutMs }));
       break;
     }
 
+    case 'select_option': {
+      locatorInfo = await resolveStepLocator(page, step, options);
+      await showStepAction(page, step, locatorInfo.locator, options);
+      extra = await runLocatorAction(
+        page,
+        locatorInfo,
+        options,
+        () => selectOption(page, getActionRoot(page, options), locatorInfo.locator, selectValueFromStep(step), options),
+      );
+      break;
+    }
+
+    case 'combo_select': {
+      locatorInfo = await resolveStepLocator(page, step, options);
+      await showStepAction(page, step, locatorInfo.locator, options);
+      extra = await runLocatorAction(
+        page,
+        locatorInfo,
+        options,
+        () => selectComboOption(page, getActionRoot(page, options), locatorInfo.locator, step, options),
+      );
+      break;
+    }
+
+    case 'dialog_accept':
+    case 'dialog_dismiss':
+    case 'dialog_prompt': {
+      await showStepAction(page, step, null, options);
+      extra = completeOrArmDialogAction(page, step, options);
+      break;
+    }
+
     case 'input': {
-      locatorInfo = await resolveLocator(page, step, options);
+      locatorInfo = await resolveStepLocator(page, step, options);
       await showStepAction(page, step, locatorInfo.locator, options);
       await runLocatorAction(
         page,
         locatorInfo,
         options,
-        () => fillInput(page, locatorInfo.locator, step.value ?? '', options, step),
+        () => fillInput(page, locatorInfo.locator, step.value ?? '', options, step, getActionRoot(page, options)),
       );
       break;
     }
 
-    case 'file_upload': {
-      locatorInfo = await resolveLocator(page, step, options);
+    case 'input_date': {
+      locatorInfo = await resolveStepLocator(page, step, options);
       await showStepAction(page, step, locatorInfo.locator, options);
-      extra = await uploadFiles(page, locatorInfo.locator, step.value, options);
+      const dateValue = resolveDateInputValue(step);
+      await runLocatorAction(
+        page,
+        locatorInfo,
+        options,
+        () => fillInput(page, locatorInfo.locator, dateValue, options, step, getActionRoot(page, options)),
+      );
+      extra = { input_date_value: dateValue };
+      break;
+    }
+
+    case 'file_upload': {
+      locatorInfo = await resolveStepLocator(page, step, options);
+      await showStepAction(page, step, locatorInfo.locator, options);
+      extra = await uploadFiles(getActionRoot(page, options), locatorInfo.locator, fileValueFromStep(step), options);
+      break;
+    }
+
+    case 'certificate_upload': {
+      locatorInfo = await resolveStepLocator(page, step, options);
+      await showStepAction(page, step, locatorInfo.locator, options);
+      extra = await uploadCertificate(getActionRoot(page, options), locatorInfo.locator, certificateValueFromStep(step), options);
+      break;
+    }
+
+    case 'clear': {
+      locatorInfo = await resolveStepLocator(page, step, options);
+      await showStepAction(page, step, locatorInfo.locator, options);
+      await runLocatorAction(
+        page,
+        locatorInfo,
+        options,
+        () => clearInput(page, locatorInfo.locator, options),
+      );
       break;
     }
 
     case 'assert_download': {
-      locatorInfo = await resolveLocator(page, step, options);
+      locatorInfo = await resolveStepLocator(page, step, options);
       await showStepAction(page, step, locatorInfo.locator, options);
       extra = await runLocatorAction(
         page,
@@ -104,7 +266,7 @@ export async function runStep(page, testCase, step, options = {}) {
     }
 
     case 'assert_request': {
-      locatorInfo = hasLocator(step) ? await resolveLocator(page, step, options) : null;
+      locatorInfo = hasLocator(step) ? await resolveStepLocator(page, step, options) : null;
       await showStepAction(page, step, locatorInfo?.locator || null, options);
       extra = locatorInfo
         ? await runLocatorAction(
@@ -118,7 +280,7 @@ export async function runStep(page, testCase, step, options = {}) {
     }
 
     case 'assert_response': {
-      locatorInfo = hasLocator(step) ? await resolveLocator(page, step, options) : null;
+      locatorInfo = hasLocator(step) ? await resolveStepLocator(page, step, options) : null;
       await showStepAction(page, step, locatorInfo?.locator || null, options);
       extra = locatorInfo
         ? await runLocatorAction(
@@ -151,7 +313,7 @@ export async function runStep(page, testCase, step, options = {}) {
 
     case 'key': {
       if (hasLocator(step)) {
-        locatorInfo = await resolveLocator(page, step, options);
+        locatorInfo = await resolveStepLocator(page, step, options);
         await showStepAction(page, step, locatorInfo.locator, options);
         await runLocatorAction(
           page,
@@ -167,7 +329,7 @@ export async function runStep(page, testCase, step, options = {}) {
     }
 
     case 'hover': {
-      locatorInfo = await resolveLocator(page, step, options);
+      locatorInfo = await resolveStepLocator(page, step, options);
       await showStepAction(page, step, locatorInfo.locator, options);
       await runLocatorAction(page, locatorInfo, options, () => locatorInfo.locator.hover({ timeout: options.timeoutMs }));
       break;
@@ -179,17 +341,62 @@ export async function runStep(page, testCase, step, options = {}) {
       break;
     }
 
-    case 'scroll': {
-      locatorInfo = hasLocator(step) ? await resolveLocator(page, step, options) : null;
+    case 'scroll':
+    case 'scroll_to_element': {
+      locatorInfo = hasLocator(step) ? await resolveStepLocator(page, step, options) : null;
       await showStepAction(page, step, locatorInfo?.locator || null, options);
       await runScroll(page, step, options, locatorInfo?.locator || null);
       break;
     }
 
     case 'assert_text': {
-      locatorInfo = hasLocator(step) ? await resolveLocator(page, step, options) : null;
+      locatorInfo = hasLocator(step) ? await resolveStepLocator(page, step, options) : null;
       await showStepAction(page, step, locatorInfo?.locator || null, options);
       locatorInfo = await runAssertText(page, step, options, locatorInfo);
+      break;
+    }
+
+    case 'assert_text_not': {
+      locatorInfo = hasLocator(step) ? await resolveStepLocator(page, step, options) : null;
+      await showStepAction(page, step, locatorInfo?.locator || null, options);
+      locatorInfo = await runAssertTextNot(page, step, options, locatorInfo);
+      break;
+    }
+
+    case 'assert_attribute': {
+      locatorInfo = await resolveStepLocator(page, step, options);
+      await showStepAction(page, step, locatorInfo.locator, options);
+      await assertAttribute(locatorInfo.locator, step, options);
+      break;
+    }
+
+    case 'assert_script': {
+      await showStepAction(page, step, null, options);
+      const actual = await executeBrowserScript(getActionRoot(page, options), scriptFromStep(step, 'assert_script'));
+      assertValueEquals(actual, expectedFromStep(step), step, 'script result');
+      extra = { script_result_type: valueType(actual) };
+      break;
+    }
+
+    case 'assert_text_regex': {
+      locatorInfo = hasLocator(step) ? await resolveStepLocator(page, step, options) : null;
+      await showStepAction(page, step, locatorInfo?.locator || null, options);
+      locatorInfo = await runAssertTextRegex(page, step, options, locatorInfo);
+      break;
+    }
+
+    case 'implicit_wait': {
+      const timeoutMs = resolveImplicitWaitMs(step);
+      const context = browserContextFor(options);
+      const previousTimeoutMs = context.defaultTimeoutMs || options.timeoutMs;
+      context.defaultTimeoutMs = timeoutMs;
+      extra = { implicit_wait_ms: timeoutMs, previous_implicit_wait_ms: previousTimeoutMs };
+      break;
+    }
+
+    case 'pointer_move': {
+      await showStepAction(page, step, null, options);
+      extra = await movePointer(page, step, options);
       break;
     }
 
@@ -219,6 +426,388 @@ export async function runStep(page, testCase, step, options = {}) {
     visible_count: locatorInfo?.visibleCount ?? null,
     ...(locatorInfo?.diagnostics ? { details: { locator_diagnostics: locatorInfo.diagnostics } } : {}),
     ...extra,
+  };
+}
+
+const FALLBACK_BROWSER_CONTEXTS = new WeakMap();
+const DIALOG_ACTIONS = new Set(['dialog_accept', 'dialog_dismiss', 'dialog_prompt']);
+
+/**
+ * 每条用例独占浏览器执行上下文。Playwright 没有 Selenium 的全局 switchTo(frame)，
+ * 因此必须显式保存当前 Frame 和后续定位超时，避免并发用例相互污染。
+ */
+export function createBrowserActionContext({ defaultTimeoutMs } = {}) {
+  return {
+    defaultTimeoutMs: positiveTimeout(defaultTimeoutMs),
+    activeFrame: null,
+    pointerPosition: { x: 0, y: 0 },
+    dialogPlan: null,
+  };
+}
+
+function resolveBrowserActionOptions(options) {
+  const browserContext = browserContextFor(options);
+  const timeoutMs = positiveTimeout(browserContext.defaultTimeoutMs);
+  return timeoutMs
+    ? { ...options, browserContext, timeoutMs }
+    : { ...options, browserContext };
+}
+
+function browserContextFor(options = {}) {
+  if (options.browserContext && typeof options.browserContext === 'object') {
+    normalizeBrowserContext(options.browserContext);
+    return options.browserContext;
+  }
+  if (options && typeof options === 'object') {
+    let context = FALLBACK_BROWSER_CONTEXTS.get(options);
+    if (!context) {
+      context = createBrowserActionContext();
+      FALLBACK_BROWSER_CONTEXTS.set(options, context);
+    }
+    return context;
+  }
+  return createBrowserActionContext();
+}
+
+function normalizeBrowserContext(context) {
+  if (!context.pointerPosition || typeof context.pointerPosition !== 'object') {
+    context.pointerPosition = { x: 0, y: 0 };
+  }
+  if (!Number.isFinite(Number(context.pointerPosition.x))) context.pointerPosition.x = 0;
+  if (!Number.isFinite(Number(context.pointerPosition.y))) context.pointerPosition.y = 0;
+}
+
+function positiveTimeout(value) {
+  const timeoutMs = Number(value);
+  return Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.floor(timeoutMs) : 0;
+}
+
+function resolveStepLocator(page, step, options) {
+  return resolveLocator(getActionRoot(page, options), step, options);
+}
+
+function getActionRoot(page, options) {
+  if (!page || page.isClosed?.()) {
+    throw new RunnerError('PAGE_NOT_FOUND', 'No active browser page is available for this step');
+  }
+  const context = browserContextFor(options);
+  const frame = context.activeFrame;
+  if (frame && !frame.isDetached?.()) return frame;
+  if (frame?.isDetached?.()) context.activeFrame = null;
+  return page;
+}
+
+function resetActiveFrame(options) {
+  const context = browserContextFor(options);
+  context.activeFrame = null;
+}
+
+async function closeAllPages(currentPage, options) {
+  const pages = await getOpenPages(currentPage, options);
+  const failures = [];
+  await Promise.all(pages.map(async (candidate) => {
+    try {
+      await candidate.close({ runBeforeUnload: false });
+    } catch (error) {
+      failures.push({ url: candidate.url?.() || '', message: error?.message || String(error) });
+    }
+  }));
+  if (failures.length) {
+    throw new RunnerError('PAGE_CLOSE_FAILED', 'Failed to close all runner pages', { failures });
+  }
+  return {
+    _activePage: null,
+    closed_page_count: pages.length,
+  };
+}
+
+async function switchFrame(page, step, options) {
+  const index = frameIndexFromStep(step);
+  let frame;
+  let locatorInfo = null;
+  if (index != null) {
+    const parent = activeFrameOrMain(page, options);
+    const frames = parent?.childFrames?.() || [];
+    frame = frames[index] || null;
+    if (!frame) {
+      throw new RunnerError('FRAME_NOT_FOUND', `Frame index ${index} was not found`, {
+        requested_index: index,
+        child_frame_count: frames.length,
+      });
+    }
+  } else {
+    locatorInfo = await resolveStepLocator(page, step, options);
+    await showStepAction(page, step, locatorInfo.locator, options);
+    frame = await frameFromLocator(locatorInfo.locator, options);
+    if (!frame) {
+      throw new RunnerError('FRAME_NOT_FOUND', 'The resolved element does not contain a frame', {
+        locator_source: locatorInfo.source,
+        locator_type: locatorInfo.locatorType,
+        locator_value: locatorInfo.locatorValue,
+      });
+    }
+  }
+  const context = browserContextFor(options);
+  context.activeFrame = frame;
+  return {
+    locatorInfo,
+    extra: {
+      frame_url: frame.url?.() || '',
+      frame_depth: frameDepth(page, frame),
+    },
+  };
+}
+
+function frameIndexFromStep(step) {
+  const configured = firstPresent(step.frame_index, step.frameIndex, step.index);
+  if (configured !== undefined && configured !== null && String(configured).trim() !== '') {
+    const index = Number(configured);
+    if (!Number.isInteger(index) || index < 0) {
+      throw new RunnerError('FRAME_CONFIG_INVALID', `Invalid frame index: ${configured}`);
+    }
+    return index;
+  }
+  // XML/Selenium 的 value 是从 1 开始的 frame 序号；canonical frame_index 始终从 0 开始。
+  const legacy = String(step.value ?? '').trim();
+  if (!/^\d+$/.test(legacy)) return null;
+  return Math.max(0, Number(legacy) - 1);
+}
+
+async function frameFromLocator(locator, options) {
+  const handle = await locator.elementHandle({ timeout: options.timeoutMs });
+  if (!handle) return null;
+  try {
+    return await handle.contentFrame();
+  } finally {
+    if (typeof handle.dispose === 'function') await handle.dispose().catch(() => {});
+  }
+}
+
+function switchToParentFrame(page, options) {
+  const context = browserContextFor(options);
+  const current = context.activeFrame;
+  if (!current) return { frame_depth: 0, frame_url: page.url?.() || '' };
+  const parent = current.parentFrame?.();
+  const main = page.mainFrame?.();
+  context.activeFrame = parent && parent !== main ? parent : null;
+  return {
+    frame_depth: context.activeFrame ? frameDepth(page, context.activeFrame) : 0,
+    frame_url: context.activeFrame?.url?.() || page.url?.() || '',
+  };
+}
+
+function switchToMainFrame(options) {
+  resetActiveFrame(options);
+  return { frame_depth: 0 };
+}
+
+function activeFrameOrMain(page, options) {
+  const active = browserContextFor(options).activeFrame;
+  return active && !active.isDetached?.() ? active : page.mainFrame?.() || null;
+}
+
+function frameDepth(page, frame) {
+  const main = page.mainFrame?.();
+  let current = frame;
+  let depth = 0;
+  while (current && current !== main && depth < 64) {
+    depth += 1;
+    current = current.parentFrame?.();
+  }
+  return depth;
+}
+
+function isDialogAction(action) {
+  return DIALOG_ACTIONS.has(normalizeActionType(action));
+}
+
+function armNextDialogAction(page, nextStep, options) {
+  const action = normalizeActionType(nextStep?.action_type);
+  if (!isDialogAction(action)) return;
+  armDialogAction(page, nextStep, options);
+}
+
+function completeOrArmDialogAction(page, step, options) {
+  const context = browserContextFor(options);
+  const action = normalizeActionType(step.action_type);
+  const existing = context.dialogPlan;
+  if (existing && existing.page === page && existing.action === action) {
+    if (existing.status === 'failed') {
+      context.dialogPlan = null;
+      throw new RunnerError('DIALOG_ACTION_FAILED', existing.error?.message || 'Browser dialog action failed', {
+        dialog_type: existing.dialogType || '',
+      });
+    }
+    if (existing.status === 'handled') {
+      context.dialogPlan = null;
+      return {
+        dialog_action: action,
+        dialog_handled: true,
+        dialog_type: existing.dialogType || '',
+      };
+    }
+    return { dialog_action: action, dialog_armed: true };
+  }
+  armDialogAction(page, step, options);
+  return { dialog_action: action, dialog_armed: true };
+}
+
+function armDialogAction(page, step, options) {
+  if (!page || typeof page.once !== 'function') {
+    throw new RunnerError('DIALOG_UNAVAILABLE', 'Browser page cannot subscribe to dialog events');
+  }
+  const context = browserContextFor(options);
+  const action = normalizeActionType(step.action_type);
+  const existing = context.dialogPlan;
+  if (existing && existing.page === page && existing.action === action && existing.status === 'armed') {
+    return existing;
+  }
+  if (existing?.page?.off && existing.listener) {
+    existing.page.off('dialog', existing.listener);
+  }
+  const plan = {
+    page,
+    action,
+    promptValue: action === 'dialog_prompt' ? String(firstPresent(step.value, step.prompt_value, step.promptValue) ?? '') : '',
+    status: 'armed',
+    dialogType: '',
+    error: null,
+    listener: null,
+  };
+  plan.listener = async (dialog) => {
+    try {
+      plan.dialogType = String(dialog.type?.() || '');
+      if (plan.action === 'dialog_dismiss') {
+        await dialog.dismiss();
+      } else if (plan.action === 'dialog_prompt') {
+        await dialog.accept(plan.promptValue);
+      } else {
+        await dialog.accept();
+      }
+      plan.status = 'handled';
+    } catch (error) {
+      plan.status = 'failed';
+      plan.error = error instanceof Error ? error : new Error(String(error));
+    }
+  };
+  page.once('dialog', plan.listener);
+  context.dialogPlan = plan;
+  return plan;
+}
+
+function scriptFromStep(step, action) {
+  const script = String(firstPresent(step.script, step.javascript, step.code, step.value) ?? '').trim();
+  if (!script) throw new RunnerError('METHOD_CONFIG_INVALID', `${action} requires script`);
+  return script;
+}
+
+async function executeBrowserScript(root, script) {
+  try {
+    // 脚本只在已连接的页面/Frame 中执行，绝不通过 Node eval 执行；保留 Selenium 旧脚本的 return 语义。
+    return await root.evaluate((source) => Function(String(source))(), script);
+  } catch (error) {
+    throw new RunnerError('SCRIPT_EXECUTION_FAILED', `Browser script failed: ${error?.message || String(error)}`);
+  }
+}
+
+function valueType(value) {
+  if (value == null) return String(value);
+  if (Array.isArray(value)) return 'array';
+  return typeof value;
+}
+
+function resolveImplicitWaitMs(step) {
+  const configured = firstPresent(step.duration_ms, step.timeout_ms, step.timeoutMs);
+  const legacyValue = firstPresent(step.value, configured);
+  const rawValue = configured ?? legacyValue;
+  const number = Number(rawValue);
+  if (!Number.isFinite(number) || number < 0) {
+    throw new RunnerError('METHOD_CONFIG_INVALID', `Invalid implicit wait duration: ${rawValue}`);
+  }
+  const unit = String(firstPresent(step.duration_unit, step.durationUnit, step.unit) ?? '').trim().toLowerCase();
+  const isCanonical = Boolean(step.catalog_version || step.catalogVersion || step.method_code || step.methodCode || step.source === 'admin-manual');
+  if (['s', 'sec', 'second', 'seconds'].includes(unit) || (!unit && !isCanonical && configured == null)) {
+    return Math.floor(number * 1000);
+  }
+  // 新目录明确使用 duration_ms；旧 XML 无单位 value 保持 Selenium 的秒语义。
+  if (!unit && !isCanonical && configured != null && String(step.value ?? '').trim() !== '') {
+    return Math.floor(number * 1000);
+  }
+  return Math.floor(number);
+}
+
+async function movePointer(page, step, options) {
+  const valueConfig = objectValue(step.value);
+  const x = Number(firstPresent(step.x, valueConfig?.x));
+  const y = Number(firstPresent(step.y, valueConfig?.y));
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    throw new RunnerError('METHOD_CONFIG_INVALID', 'pointer_move requires numeric x and y');
+  }
+  const coordinate = String(firstPresent(step.coordinate, step.coordinate_mode, step.coordinateMode, valueConfig?.coordinate) || 'relative')
+    .trim()
+    .toLowerCase();
+  if (!['relative', 'absolute', 'viewport'].includes(coordinate)) {
+    throw new RunnerError('METHOD_CONFIG_INVALID', `Unsupported pointer coordinate mode: ${coordinate}`);
+  }
+  const context = browserContextFor(options);
+  const targetX = coordinate === 'relative' ? context.pointerPosition.x + x : x;
+  const targetY = coordinate === 'relative' ? context.pointerPosition.y + y : y;
+  await page.mouse.move(targetX, targetY, { steps: Math.max(1, Number(step.steps) || 1) });
+  context.pointerPosition = { x: targetX, y: targetY };
+  return {
+    pointer_coordinate_mode: coordinate,
+    pointer_x: targetX,
+    pointer_y: targetY,
+  };
+}
+
+function objectValue(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  const text = String(value ?? '').trim();
+  if (!text) return null;
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function firstPresent(...values) {
+  for (const value of values) {
+    if (value == null) continue;
+    if (typeof value === 'string' && !value.trim()) continue;
+    return value;
+  }
+  return undefined;
+}
+
+/**
+ * 截图只在本次 OCR 任务创建请求中以 base64 传递；识别结果由 Agent 返回到变量上下文，
+ * 不能进入 Runner 报告或磁盘工件，避免验证码和会话内容被长期保存。
+ */
+async function runCaptchaOcr(page, testCase, step, options, startedAt) {
+  if (!String(step.variable_name || '').trim()) {
+    throw new RunnerError('METHOD_CONFIG_INVALID', 'captcha_ocr 缺少 variable_name');
+  }
+  const locatorInfo = await resolveStepLocator(page, step, options);
+  await showStepAction(page, step, locatorInfo.locator, options);
+  const image = await locatorInfo.locator.screenshot({ type: 'png', timeout: options.timeoutMs });
+  if (!image?.length || image.length > 2 * 1024 * 1024) {
+    throw new RunnerError('CAPTCHA_IMAGE_INVALID', '验证码截图为空或超过 2MB 限制');
+  }
+  const result = await runInfrastructureStep(testCase, step, {
+    ...options,
+    runtimeInput: { captcha_image_base64: image.toString('base64') },
+  });
+  return {
+    ...result,
+    duration_ms: result.duration_ms ?? Date.now() - startedAt,
+    locator_source: locatorInfo.source || '',
+    locator_type: locatorInfo.locatorType || '',
+    locator_value: locatorInfo.locatorValue || '',
+    matched_count: locatorInfo.matchedCount ?? null,
+    visible_count: locatorInfo.visibleCount ?? null,
   };
 }
 
@@ -321,7 +910,7 @@ function recentResourceFailures(options) {
     }));
 }
 
-async function fillInput(page, locator, value, options, step = {}) {
+async function fillInput(page, locator, value, options, step = {}, root = page) {
   const tag = await locator.evaluate((el) => el.tagName.toLowerCase()).catch(() => '');
   if (await isMonacoEditor(locator)) {
     await fillMonacoEditor(page, locator, value, options);
@@ -351,7 +940,7 @@ async function fillInput(page, locator, value, options, step = {}) {
         return;
       }
     }
-    await selectCustomOption(page, locator, value, options);
+    await selectCustomOption(root, locator, value, options);
     return;
   }
   if (tag === 'input' || tag === 'textarea') {
@@ -362,6 +951,191 @@ async function fillInput(page, locator, value, options, step = {}) {
     tag,
     value_preview: String(value ?? '').slice(0, 200),
   });
+}
+
+async function selectOption(page, root, locator, rawOption, options) {
+  const option = parseSelectOption(rawOption);
+  const tag = await locator.evaluate((element) => String(element.tagName || '').toLowerCase()).catch(() => '');
+  if (tag === 'select') {
+    try {
+      await locator.selectOption(option, { timeout: options.timeoutMs });
+    } catch (error) {
+      const text = optionText(option);
+      if (!text) throw error;
+      await locator.selectOption({ label: text }, { timeout: options.timeoutMs });
+    }
+    return { selected_option: optionText(option) };
+  }
+
+  const text = optionText(option);
+  if (!text) {
+    throw new RunnerError('METHOD_CONFIG_INVALID', 'select_option requires option value for a custom select');
+  }
+  await selectCustomOption(root, locator, text, options);
+  return { selected_option: text };
+}
+
+function selectValueFromStep(step) {
+  return firstPresent(step.option, step.option_value, step.optionValue, step.value);
+}
+
+async function selectComboOption(page, root, locator, step, options) {
+  const searchText = String(firstPresent(step.search, step.query, step.value, step.option) ?? '').trim();
+  const optionTextValue = String(firstPresent(step.option, step.option_text, step.optionText, searchText) ?? '').trim();
+  const tag = await locator.evaluate((element) => String(element.tagName || '').toLowerCase()).catch(() => '');
+  if (tag === 'select') {
+    return selectOption(page, root, locator, optionTextValue, options);
+  }
+
+  if (await isCustomSelect(locator)) {
+    await locator.click({ timeout: options.timeoutMs });
+    const input = await findCustomSelectInput(locator);
+    if (input && searchText) {
+      await input.fill(searchText, { timeout: options.timeoutMs });
+    }
+  } else if (searchText) {
+    await fillInput(page, locator, searchText, options, step, root);
+  }
+
+  const explicitOption = String(firstPresent(step.option_selector, step.optionSelector, step.element) ?? '').trim();
+  if (explicitOption) {
+    const optionLocator = root.locator(normalizeLocatorExpression(explicitOption)).first();
+    await optionLocator.click({ timeout: options.timeoutMs });
+    return { selected_option: optionTextValue || explicitOption, combo_search: searchText };
+  }
+  if (!optionTextValue) {
+    throw new RunnerError('METHOD_CONFIG_INVALID', 'combo_select requires option or element');
+  }
+  await selectCustomOption(root, locator, optionTextValue, options);
+  return { selected_option: optionTextValue, combo_search: searchText };
+}
+
+function parseSelectOption(rawOption) {
+  if (rawOption && typeof rawOption === 'object') return rawOption;
+  const value = String(rawOption ?? '').trim();
+  if (!value) throw new RunnerError('METHOD_CONFIG_INVALID', 'select_option requires option');
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed && typeof parsed === 'object') return parsed;
+  } catch {
+    // 普通字符串同时兼容原生 select 的 value 与 label。
+  }
+  return value;
+}
+
+function optionText(option) {
+  if (option && typeof option === 'object') {
+    return String(firstPresent(option.label, option.value, option.text, option.index) ?? '').trim();
+  }
+  return String(option ?? '').trim();
+}
+
+function normalizeLocatorExpression(value) {
+  return value.startsWith('/') || value.startsWith('(') ? `xpath=${value}` : value;
+}
+
+async function clearInput(page, locator, options) {
+  if (await isMonacoEditor(locator)) {
+    await fillMonacoEditor(page, locator, '', options);
+    return;
+  }
+  const tag = await locator.evaluate((element) => String(element.tagName || '').toLowerCase()).catch(() => '');
+  const editable = await locator.evaluate((element) => element.isContentEditable || element.closest('[contenteditable="true"]') != null).catch(() => false);
+  if (editable) {
+    await locator.click({ timeout: options.timeoutMs });
+    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A');
+    await page.keyboard.press('Backspace');
+    return;
+  }
+  if (tag === 'input' || tag === 'textarea') {
+    await locator.fill('', { timeout: options.timeoutMs });
+    return;
+  }
+  throw new RunnerError('UNSUPPORTED_CONTROL', 'clear requires an input, textarea, contenteditable, or Monaco editor', { tag });
+}
+
+function resolveDateInputValue(step) {
+  const explicitValue = String(firstPresent(step.date_value, step.dateValue, step.value) ?? '').trim();
+  if (explicitValue) return explicitValue;
+  const format = String(firstPresent(step.format, step.date_format, step.dateFormat, step.key) || 'yyyy-MM-dd HH:mm:ss').trim();
+  const offsetExpression = firstPresent(step.offset_seconds, step.offsetSeconds, step.offset, step.keys);
+  const offsetSeconds = offsetExpression == null || String(offsetExpression).trim() === ''
+    ? 0
+    : evaluateSafeSecondsExpression(offsetExpression);
+  return formatDate(new Date(Date.now() + offsetSeconds * 1000), format);
+}
+
+function evaluateSafeSecondsExpression(value) {
+  const expression = String(value ?? '').trim();
+  if (!/^[0-9+\-*/().\s]+$/.test(expression)) {
+    throw new RunnerError('METHOD_CONFIG_INVALID', `Unsupported date offset expression: ${expression}`);
+  }
+  const tokens = expression.match(/\d+(?:\.\d+)?|[()+\-*/]/g) || [];
+  if (!tokens.length || tokens.join('') !== expression.replace(/\s+/g, '')) {
+    throw new RunnerError('METHOD_CONFIG_INVALID', `Invalid date offset expression: ${expression}`);
+  }
+  let position = 0;
+  const parsePrimary = () => {
+    const token = tokens[position];
+    if (token === '+') {
+      position += 1;
+      return parsePrimary();
+    }
+    if (token === '-') {
+      position += 1;
+      return -parsePrimary();
+    }
+    if (token === '(') {
+      position += 1;
+      const result = parseExpression();
+      if (tokens[position] !== ')') throw new RunnerError('METHOD_CONFIG_INVALID', `Invalid date offset expression: ${expression}`);
+      position += 1;
+      return result;
+    }
+    const parsed = Number(token);
+    if (!Number.isFinite(parsed)) throw new RunnerError('METHOD_CONFIG_INVALID', `Invalid date offset expression: ${expression}`);
+    position += 1;
+    return parsed;
+  };
+  const parseTerm = () => {
+    let result = parsePrimary();
+    while (['*', '/'].includes(tokens[position])) {
+      const operator = tokens[position];
+      position += 1;
+      const right = parsePrimary();
+      if (operator === '/' && right === 0) throw new RunnerError('METHOD_CONFIG_INVALID', 'Date offset cannot divide by zero');
+      result = operator === '*' ? result * right : result / right;
+    }
+    return result;
+  };
+  const parseExpression = () => {
+    let result = parseTerm();
+    while (['+', '-'].includes(tokens[position])) {
+      const operator = tokens[position];
+      position += 1;
+      const right = parseTerm();
+      result = operator === '+' ? result + right : result - right;
+    }
+    return result;
+  };
+  const result = parseExpression();
+  if (position !== tokens.length || !Number.isFinite(result)) {
+    throw new RunnerError('METHOD_CONFIG_INVALID', `Invalid date offset expression: ${expression}`);
+  }
+  return result;
+}
+
+function formatDate(date, format) {
+  const values = {
+    yyyy: String(date.getFullYear()).padStart(4, '0'),
+    yy: String(date.getFullYear() % 100).padStart(2, '0'),
+    MM: String(date.getMonth() + 1).padStart(2, '0'),
+    dd: String(date.getDate()).padStart(2, '0'),
+    HH: String(date.getHours()).padStart(2, '0'),
+    mm: String(date.getMinutes()).padStart(2, '0'),
+    ss: String(date.getSeconds()).padStart(2, '0'),
+  };
+  return format.replace(/yyyy|yy|MM|dd|HH|mm|ss/g, (token) => values[token]);
 }
 
 async function clickOpenPage(page, locator, options) {
@@ -581,23 +1355,92 @@ async function runScroll(page, step, options, locator) {
     return;
   }
   const y = Number(step.value) || 500;
+  const root = getActionRoot(page, options);
+  if (root !== page && typeof root.evaluate === 'function') {
+    await root.evaluate((offset) => window.scrollBy(0, offset), y);
+    return;
+  }
   await page.mouse.wheel(0, y);
 }
 
 async function runAssertText(page, step, options, locatorInfo) {
-  const expected = String(step.value ?? '');
+  const expected = expectedFromStep(step);
   if (locatorInfo) {
     const actual = await locatorInfo.locator.textContent({ timeout: options.timeoutMs });
     assertContains(actual, expected, step);
     return locatorInfo;
   }
-  const bodyText = await page.locator('body').textContent({ timeout: options.timeoutMs });
+  const bodyText = await getActionRoot(page, options).locator('body').textContent({ timeout: options.timeoutMs });
   assertContains(bodyText, expected, step);
   return null;
 }
 
+async function runAssertTextNot(page, step, options, locatorInfo) {
+  const expected = expectedFromStep(step);
+  const actual = locatorInfo
+    ? await locatorInfo.locator.textContent({ timeout: options.timeoutMs })
+    : await getActionRoot(page, options).locator('body').textContent({ timeout: options.timeoutMs });
+  assertValueNotEquals(actual, expected, step, 'text');
+  return locatorInfo;
+}
+
+async function assertAttribute(locator, step, options) {
+  const attribute = String(firstPresent(step.attribute, step.name, step.value) ?? '').trim();
+  if (!attribute) throw new RunnerError('METHOD_CONFIG_INVALID', 'assert_attribute requires attribute');
+  const actual = await locator.getAttribute(attribute, { timeout: options.timeoutMs });
+  assertValueEquals(actual, expectedFromStep(step), step, `attribute ${attribute}`);
+}
+
+async function runAssertTextRegex(page, step, options, locatorInfo) {
+  const rawRegex = String(firstPresent(step.regex, step.pattern, step.value) ?? '');
+  let regex;
+  try {
+    regex = new RegExp(rawRegex);
+  } catch (error) {
+    throw new RunnerError('METHOD_CONFIG_INVALID', `Invalid text regex: ${error?.message || rawRegex}`);
+  }
+  const actual = locatorInfo
+    ? await locatorInfo.locator.textContent({ timeout: options.timeoutMs })
+    : await getActionRoot(page, options).locator('body').textContent({ timeout: options.timeoutMs });
+  if (!regex.test(String(actual ?? ''))) {
+    throw new RunnerError('ASSERTION_FAILED', `Text did not match regex: ${rawRegex.slice(0, 200)}`, {
+      step_id: step.id,
+      step_index: step.step_index,
+      regex: rawRegex.slice(0, 500),
+      actual_preview: String(actual ?? '').slice(0, 500),
+    });
+  }
+  return locatorInfo;
+}
+
 function hasLocator(step) {
   return Boolean(String(step.target_selector || step.target_xpath || '').trim() || step.locator_meta);
+}
+
+function expectedFromStep(step) {
+  return String(firstPresent(step.expect, step.expected, step.value) ?? '');
+}
+
+function assertValueEquals(actual, expected, step, subject) {
+  if (String(actual ?? '') !== String(expected ?? '')) {
+    throw new RunnerError('ASSERTION_FAILED', `Expected ${subject} did not match`, {
+      step_id: step.id,
+      step_index: step.step_index,
+      expected: String(expected ?? '').slice(0, 500),
+      actual_preview: String(actual ?? '').slice(0, 500),
+    });
+  }
+}
+
+function assertValueNotEquals(actual, expected, step, subject) {
+  if (String(actual ?? '') === String(expected ?? '')) {
+    throw new RunnerError('ASSERTION_FAILED', `Expected ${subject} to be different`, {
+      step_id: step.id,
+      step_index: step.step_index,
+      unexpected: String(expected ?? '').slice(0, 500),
+      actual_preview: String(actual ?? '').slice(0, 500),
+    });
+  }
 }
 
 function assertContains(actual, expected, step) {
@@ -624,6 +1467,25 @@ async function uploadFiles(page, locator, rawValue, options) {
     upload_input_selector: config.inputSelector || '',
     upload_via_proxy: Boolean(config.inputSelector),
   };
+}
+
+async function uploadCertificate(page, locator, rawValue, options) {
+  const result = await uploadFiles(page, locator, rawValue, options);
+  // 证书路径可能带有执行节点目录信息；执行结果只保留文件名，不回传路径或证书正文。
+  return {
+    certificate_uploaded: true,
+    uploaded_certificate_files: result.uploaded_files.map((file) => path.basename(file)),
+    upload_input_selector: result.upload_input_selector,
+    upload_via_proxy: result.upload_via_proxy,
+  };
+}
+
+function fileValueFromStep(step) {
+  return firstPresent(step.file_ref, step.fileRef, step.files, step.file, step.value);
+}
+
+function certificateValueFromStep(step) {
+  return firstPresent(step.certificate_ref, step.certificateRef, step.file_ref, step.fileRef, step.value);
 }
 
 async function resolveUploadInput(page, locator, config, options) {
@@ -653,24 +1515,31 @@ async function resolveUploadInput(page, locator, config, options) {
 }
 
 function parseFileUploadConfig(rawValue) {
-  if (Array.isArray(rawValue)) return { files: rawValue.map(resolveLocalPath), inputSelector: '', raw: rawValue };
+  if (Array.isArray(rawValue)) return { files: rawValue.map(resolveFileReference), inputSelector: '', raw: rawValue };
+  if (rawValue && typeof rawValue === 'object') return fileUploadConfigFromObject(rawValue);
   const value = String(rawValue ?? '').trim();
   if (!value) return { files: [], inputSelector: '', raw: rawValue };
   try {
     const parsed = JSON.parse(value);
-    if (Array.isArray(parsed)) return { files: parsed.map(resolveLocalPath), inputSelector: '', raw: parsed };
-    if (parsed && typeof parsed === 'object') {
-      const rawFiles = Array.isArray(parsed.files) ? parsed.files : parsed.file ? [parsed.file] : [];
-      return {
-        files: rawFiles.map(resolveLocalPath),
-        inputSelector: String(parsed.inputSelector || parsed.input_selector || '').trim(),
-        raw: parsed,
-      };
-    }
+    if (Array.isArray(parsed)) return { files: parsed.map(resolveFileReference), inputSelector: '', raw: parsed };
+    if (parsed && typeof parsed === 'object') return fileUploadConfigFromObject(parsed);
   } catch {
     // Fall through to comma-separated paths.
   }
   return { files: value.split(',').map((item) => item.trim()).filter(Boolean).map(resolveLocalPath), inputSelector: '', raw: rawValue };
+}
+
+function fileUploadConfigFromObject(config) {
+  const rawFiles = Array.isArray(config.files)
+    ? config.files
+    : firstPresent(config.file, config.path, config.file_path, config.filePath, config.local_path, config.localPath) != null
+      ? [firstPresent(config.file, config.path, config.file_path, config.filePath, config.local_path, config.localPath)]
+      : [];
+  return {
+    files: rawFiles.map(resolveFileReference),
+    inputSelector: String(config.inputSelector || config.input_selector || '').trim(),
+    raw: config,
+  };
 }
 
 function parseFileList(rawValue) {
@@ -690,6 +1559,25 @@ function parseFileList(rawValue) {
 function resolveLocalPath(filePath) {
   const value = String(filePath || '').trim();
   return path.isAbsolute(value) ? value : path.resolve(process.cwd(), value);
+}
+
+function resolveFileReference(fileReference) {
+  const rawPath = fileReference && typeof fileReference === 'object'
+    ? firstPresent(
+      fileReference.path,
+      fileReference.file_path,
+      fileReference.filePath,
+      fileReference.local_path,
+      fileReference.localPath,
+      fileReference.resolved_path,
+      fileReference.resolvedPath,
+    )
+    : fileReference;
+  const value = String(rawPath ?? '').trim();
+  if (!value) {
+    throw new RunnerError('FILE_REFERENCE_UNRESOLVED', 'file_ref must include a runner-resolved local path');
+  }
+  return resolveLocalPath(value);
 }
 
 async function assertDownload(page, locator, rawValue, options) {
@@ -822,7 +1710,7 @@ async function runAssertJson(page, step, options) {
   let info = null;
   let actual;
   if (hasTarget) {
-    info = await resolveLocator(page, step, options);
+    info = await resolveStepLocator(page, step, options);
     const text = await info.locator.textContent({ timeout: options.timeoutMs });
     actual = parseJsonStrict(text, step);
   } else {

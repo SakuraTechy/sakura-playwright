@@ -24,6 +24,7 @@ export function parseArgs(argv = process.argv.slice(2), env = process.env) {
     batchId: args['batch-id'] || mergedEnv.CUECAST_BATCH_ID || '',
     runId: args['run-id'] || mergedEnv.CUECAST_RUN_ID || '',
     jobId: args['job-id'] || mergedEnv.CUECAST_JOB_ID || '',
+    executionId: args['execution-id'] || mergedEnv.CUECAST_EXECUTION_ID || '',
     projectEnvironmentId: args['project-environment-id'] || mergedEnv.CUECAST_PROJECT_ENVIRONMENT_ID || '',
     apiBase: trimTrailingSlash(args['api-base'] || mergedEnv.CUECAST_API_BASE || 'http://127.0.0.1:4173/api'),
     // 平台任务未传 API 地址时使用 .env 的 admin 协议；旧 test-lab 命令显式传入 mock API 时保持原协议。
@@ -44,6 +45,13 @@ export function parseArgs(argv = process.argv.slice(2), env = process.env) {
     slowMoMs: parseIntegerInRange(args['slow-mo'] ?? mergedEnv.RUNNER_SLOW_MO_MS, 0, 0, 10000, 'slow-mo'),
     finishDelayMs: parseIntegerInRange(args['finish-delay'] ?? mergedEnv.RUNNER_FINISH_DELAY_MS, 0, 0, 600000, 'finish-delay'),
     timeoutMs: parseIntegerInRange(args.timeout ?? mergedEnv.RUNNER_STEP_TIMEOUT_MS, 6000, 1000, 300000, 'timeout'),
+    infrastructurePollIntervalMs: parseIntegerInRange(
+      args['infrastructure-poll-interval'] ?? mergedEnv.RUNNER_INFRASTRUCTURE_POLL_INTERVAL_MS,
+      500,
+      100,
+      10000,
+      'infrastructure-poll-interval',
+    ),
     caseTimeoutMs: parseIntegerInRange(args['case-timeout'] ?? mergedEnv.RUNNER_CASE_TIMEOUT_MS, 600000, 10000, 3600000, 'case-timeout'),
     startStep: parseNonNegativeInt(args['start-step'], 0),
     trace: args.trace || mergedEnv.RUNNER_TRACE || 'off',
