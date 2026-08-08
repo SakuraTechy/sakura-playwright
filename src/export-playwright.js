@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { ApiClient } from './api/api-client.js';
 import { normalizeCase } from './runner/case-loader.js';
 import { formatPlatformDateTime, loadRunnerEnv, parseCliArgs, timestampForPath, trimTrailingSlash } from './shared/utils.js';
@@ -30,7 +31,7 @@ function parseExportArgs(argv = process.argv.slice(2), env = process.env) {
   };
 }
 
-async function renderSpec(testCase, config) {
+export async function renderSpec(testCase, config) {
   const preparedSteps = await Promise.all(testCase.steps.map(prepareStepForExport));
   const lines = [
     "import { test, expect } from 'playwright/test';",
@@ -44,6 +45,7 @@ async function renderSpec(testCase, config) {
     `test(${quoteJs(`CueCast case ${testCase.id}: ${testCase.name || ''}`)}, async ({ page: initialPage }) => {`,
     '  let page = initialPage;',
     '  const cuecastPages = [page];',
+    '  const cuecastVariables = {};',
     `  const apiBase = process.env.CUECAST_API_BASE || ${quoteJs(config.apiBase)};`,
     `  const startUrl = process.env.CUECAST_START_URL || ${quoteJs(testCase.start_url)};`,
     '  const networkEvents = [];',
@@ -95,7 +97,7 @@ function renderStep(prepared) {
   }
   switch (action) {
     case 'navigate':
-      return [`  await page.goto(${quoteJs(String(value || step.url || ''))});`];
+      return [`  await page.goto(${renderRuntimeString(value || step.url || '')});`];
     case 'click':
       return [`  await ${locator}.click();`];
     case 'double_click':
@@ -103,15 +105,19 @@ function renderStep(prepared) {
     case 'right_click':
       return [`  await ${locator}.click({ button: 'right' });`];
     case 'input':
-      return [`  await ${locator}.fill(${quoteJs(String(value ?? ''))});`];
+      return [`  await ${locator}.fill(${renderRuntimeString(value)});`];
     case 'key':
-      return locator ? [`  await ${locator}.press(${quoteJs(String(value || 'Enter'))});`] : [`  await page.keyboard.press(${quoteJs(String(value || 'Enter'))});`];
+      return locator ? [`  await ${locator}.press(${renderRuntimeString(value || 'Enter')});`] : [`  await page.keyboard.press(${renderRuntimeString(value || 'Enter')});`];
     case 'hover':
       return [`  await ${locator}.hover();`];
     case 'assert_text':
       return locator
-        ? [`  await expect(${locator}).toContainText(${quoteJs(String(value ?? ''))});`]
-        : [`  await expect(page.locator('body')).toContainText(${quoteJs(String(value ?? ''))});`];
+        ? [`  await expect(${locator}).toContainText(${renderRuntimeString(value)});`]
+        : [`  await expect(page.locator('body')).toContainText(${renderRuntimeString(value)});`];
+    case 'global_variable_set':
+      return renderGlobalVariableSet(step, locator, suffix);
+    case 'assert_element_match':
+      return renderElementMatch(step, locator, suffix);
     case 'file_upload':
       return renderFileUpload(locator, value);
     case 'assert_download':
@@ -150,6 +156,51 @@ function renderStep(prepared) {
     default:
       return [`  // TODO: action ${quoteJs(action)} requires custom export handling.`];
   }
+}
+
+function renderGlobalVariableSet(step, locator, suffix) {
+  const sourceType = String(step.source_type || step.source || 'literal').trim().toLowerCase();
+  const variableName = String(step.variable_name || '').trim();
+  const rawName = `cuecastVariableRaw${suffix}`;
+  let source;
+  if (['locator', 'element', '页面元素', '元素'].includes(sourceType)) {
+    source = `await cuecastReadElementValue(${locator}, ${quoteJs(step.read_mode || 'text')})`;
+  } else if (['literal', 'value', 'text', 'constant', '常量', '固定值'].includes(sourceType)) {
+    source = `cuecastResolveVariables(${jsValue(step.value ?? '')}, cuecastVariables)`;
+  } else if (['script', 'javascript', 'js', '脚本'].includes(sourceType)) {
+    source = `await page.evaluate((script) => Function('"use strict"; return (function () {\\n' + script + '\\n})();')(), ${renderRuntimeString(step.script || step.value || '')})`;
+  } else {
+    throw new Error(`Unsupported exported variable source_type: ${sourceType || '(empty)'}`);
+  }
+  const transform = {
+    regex: step.regex || '',
+    regexGroup: step.regex_group ?? 0,
+    replaceFrom: step.replace_from ?? '',
+    replaceTo: step.replace_to ?? '',
+  };
+  return [
+    `  const ${rawName} = ${source};`,
+    `  cuecastVariables[${quoteJs(variableName)}] = cuecastExtractVariable(${rawName}, ${jsValue(transform)});`,
+  ];
+}
+
+function renderElementMatch(step, locator, suffix) {
+  const matchMode = String(step.match_mode || '').trim().toLowerCase();
+  if (matchMode === 'visible') return [`  await expect(${locator}).toBeVisible();`];
+  if (!['contains', 'equals', 'not_contains', 'regex'].includes(matchMode)) {
+    throw new Error(`Unsupported exported element match_mode: ${matchMode || '(empty)'}`);
+  }
+  const actualName = `cuecastAssertionActual${suffix}`;
+  const expectedName = `cuecastAssertionExpected${suffix}`;
+  const lines = [
+    `  const ${actualName} = String(await cuecastReadElementValue(${locator}, ${quoteJs(step.read_mode || 'auto')}));`,
+    `  const ${expectedName} = ${renderRuntimeString(step.expect ?? step.value ?? '')};`,
+  ];
+  if (matchMode === 'contains') lines.push(`  expect(${actualName}).toContain(${expectedName});`);
+  if (matchMode === 'equals') lines.push(`  expect(${actualName}).toBe(${expectedName});`);
+  if (matchMode === 'not_contains') lines.push(`  expect(${actualName}).not.toContain(${expectedName});`);
+  if (matchMode === 'regex') lines.push(`  expect(${actualName}).toMatch(new RegExp(${expectedName}));`);
+  return lines;
 }
 
 function renderAssertJson(step, locator, suffix) {
@@ -268,7 +319,7 @@ function parseFileUploadConfig(rawValue) {
 }
 
 function needsLocator(action) {
-  return ['click', 'double_click', 'right_click', 'input', 'hover', 'assert_text', 'file_upload', 'assert_download', 'click_open_page'].includes(action);
+  return ['click', 'double_click', 'right_click', 'input', 'hover', 'assert_text', 'global_variable_set', 'assert_element_match', 'file_upload', 'assert_download', 'click_open_page'].includes(action);
 }
 
 function parseMeta(raw) {
@@ -300,6 +351,10 @@ function quoteJs(value) {
   return JSON.stringify(String(value ?? ''));
 }
 
+function renderRuntimeString(value) {
+  return `String(cuecastResolveVariables(${quoteJs(value)}, cuecastVariables))`;
+}
+
 function safeIdentifier(value) {
   const id = String(value ?? 'step').replace(/\W+/g, '_').replace(/^_+|_+$/g, '');
   return id ? `_${id}` : '_step';
@@ -310,6 +365,56 @@ function escapeComment(value) {
 }
 
 const PLAYWRIGHT_HELPERS = [
+  'async function cuecastReadElementValue(locator, rawReadMode) {',
+  '  const readMode = String(rawReadMode || "auto").toLowerCase();',
+  '  await locator.waitFor({ state: "attached" });',
+  '  return locator.evaluate((node, mode) => {',
+  '    const tagName = String(node.tagName || "").toLowerCase();',
+  '    const effectiveMode = mode === "auto" && ["input", "textarea", "select"].includes(tagName) ? "value" : mode;',
+  '    if (effectiveMode === "value") return "value" in node ? node.value : "";',
+  '    return typeof node.innerText === "string" ? node.innerText : (node.textContent || "");',
+  '  }, readMode);',
+  '}',
+  '',
+  'function cuecastExtractVariable(rawValue, config) {',
+  '  let value = String(rawValue ?? "");',
+  '  if (config.regex) {',
+  '    const match = new RegExp(String(config.regex)).exec(value);',
+  '    if (!match) throw new Error("CueCast variable regex did not match");',
+  '    const group = String(config.regexGroup ?? "0");',
+  '    const extracted = match.groups && Object.prototype.hasOwnProperty.call(match.groups, group) ? match.groups[group] : match[Number(group)];',
+  '    if (extracted == null) throw new Error(`CueCast variable regex group was not found: ${group}`);',
+  '    value = extracted;',
+  '  }',
+  '  if (config.replaceFrom != null && String(config.replaceFrom) !== "") {',
+  '    value = value.split(String(config.replaceFrom)).join(String(config.replaceTo ?? ""));',
+  '  }',
+  '  return value;',
+  '}',
+  '',
+  'function cuecastResolveVariables(value, variables) {',
+  '  if (Array.isArray(value)) return value.map((item) => cuecastResolveVariables(item, variables));',
+  '  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, cuecastResolveVariables(item, variables)]));',
+  '  if (typeof value !== "string" || (!value.includes("${") && !value.includes("{{"))) return value;',
+  '  const whole = value.match(/^\\$\\{([^{}]+)}$/) || value.match(/^\\{\\{([^{}]+)}}$/);',
+  '  if (whole) return cuecastVariableReference(variables, whole[1]);',
+  '  return value.replace(/\\$\\{([^{}]+)}|\\{\\{([^{}]+)}}/g, (_all, canonical, recorded) => String(cuecastVariableReference(variables, canonical ?? recorded)));',
+  '}',
+  '',
+  'function cuecastVariableReference(variables, rawReference) {',
+  '  const reference = String(rawReference || "").trim();',
+  '  if (Object.prototype.hasOwnProperty.call(variables, reference)) return variables[reference];',
+  '  const root = Object.keys(variables).filter((name) => reference.startsWith(`${name}.`) || reference.startsWith(`${name}[`)).sort((left, right) => right.length - left.length)[0];',
+  '  if (!root) throw new Error(`CueCast variable was not found: ${reference}`);',
+  '  let current = variables[root];',
+  '  const remainder = reference.slice(root.length);',
+  '  const tokens = remainder.match(/\\.[A-Za-z_][A-Za-z0-9_-]*|\\[\\d+]/g) || [];',
+  '  if (tokens.join("") !== remainder) throw new Error(`CueCast variable reference is invalid: ${reference}`);',
+  '  for (const token of tokens) current = current[token.startsWith(".") ? token.slice(1) : Number(token.slice(1, -1))];',
+  '  if (current == null) throw new Error(`CueCast variable reference was not found: ${reference}`);',
+  '  return current;',
+  '}',
+  '',
   'function cuecastTrackPage(pages, targetPage) {',
   '  if (targetPage && !pages.includes(targetPage)) pages.push(targetPage);',
   '  return targetPage;',
@@ -657,7 +762,9 @@ const PLAYWRIGHT_HELPERS = [
   '}',
 ];
 
-main().catch((error) => {
-  console.error(`[export] ${error?.message || error}`);
-  process.exitCode = 1;
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(`[export] ${error?.message || error}`);
+    process.exitCode = 1;
+  });
+}

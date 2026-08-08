@@ -24,6 +24,7 @@ import {
   loadStorageState,
   loadStorageStateBundle,
   redactSensitiveCliArgs,
+  resolveSharedBrowserStart,
   resolveSessionStartUrl,
   restoreSessionStorage,
   saveStorageState,
@@ -37,6 +38,7 @@ test('platform CLI options override runner environment defaults', () => {
     '--run-id', 'RUN-20260717-0001',
     '--job-id', 'JOB-20260717-0001',
     '--execution-id', 'EXEC-20260717-0001',
+    '--execution-capability', 'capability-1',
     '--project-environment-id', '47',
     '--headed', 'true',
     '--ignore-https-errors', 'false',
@@ -56,6 +58,7 @@ test('platform CLI options override runner environment defaults', () => {
   assert.equal(config.runId, 'RUN-20260717-0001');
   assert.equal(config.jobId, 'JOB-20260717-0001');
   assert.equal(config.executionId, 'EXEC-20260717-0001');
+  assert.equal(config.executionCapability, 'capability-1');
   assert.equal(config.headed, true);
   assert.equal(config.ignoreHttpsErrors, false);
   assert.equal(config.liveFrameQuality, 'high');
@@ -220,8 +223,10 @@ test('live frame keeps full jpeg while carrying focus presentation metadata', ()
 test('admin case request includes the selected project environment', async () => {
   const originalFetch = globalThis.fetch;
   let requestedUrl = '';
-  globalThis.fetch = async (url) => {
+  let requestedHeaders = {};
+  globalThis.fetch = async (url, options = {}) => {
     requestedUrl = String(url);
+    requestedHeaders = options.headers || {};
     return {
       ok: true,
       status: 200,
@@ -233,12 +238,16 @@ test('admin case request includes the selected project environment', async () =>
       apiBase: 'http://127.0.0.1:8000',
       adminApi: true,
       projectEnvironmentId: '47',
+      batchId: 'BATCH_001',
+      executionCapability: 'capability-1',
     });
     await client.getTestCase('AAS_P_SMOKE_006:SCENE_CASE_001');
     assert.equal(
       requestedUrl,
-      'http://127.0.0.1:8000/automation/playwright/testcases/AAS_P_SMOKE_006/SCENE_CASE_001?projectEnvironmentId=47',
+      'http://127.0.0.1:8000/automation/playwright/testcases/AAS_P_SMOKE_006/SCENE_CASE_001?projectEnvironmentId=47&batchId=BATCH_001',
     );
+    // 批次读取和结果回传使用同一个短期 capability 请求头。
+    assert.equal(requestedHeaders['X-Execution-Capability'], 'capability-1');
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -267,6 +276,35 @@ test('infrastructure task requests carry only execution identity and use the adm
     assert.equal(requests[2].options.method, 'DELETE');
     assert.deepEqual(JSON.parse(requests[2].options.body), { reason: 'case_timeout' });
     assert.equal(requests[0].options.headers.Authorization, 'Bearer runner-token');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('execution capability is sent as a short-lived request header', async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (url, options = {}) => {
+    requests.push({ url: String(url), options });
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ code: 0, data: { task_id: 'INFRA_CAP', status: 'queued' } }),
+    };
+  };
+  try {
+    const client = new ApiClient({
+      apiBase: 'http://127.0.0.1:8000',
+      adminApi: true,
+      executionCapability: 'capability-1',
+    });
+    await client.createInfrastructureTask({ jobId: 'JOB_001', stepId: 'STEP_001' });
+    await client.saveResult('100:CASE_001', { success: true, raw: { batch_id: 'BATCH_001' } });
+    await client.getInfrastructureTask('INFRA_CAP');
+    await client.cancelInfrastructureTask('INFRA_CAP');
+    assert.equal(requests.length, 4);
+    for (const request of requests) assert.equal(request.options.headers['X-Execution-Capability'], 'capability-1');
+    assert.equal(JSON.parse(requests[0].options.body).executionCapability, undefined);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -399,6 +437,24 @@ test('runner rejects unsupported policies and values outside platform boundaries
     () => parseArgs(['--case-id', '100:CASE_001', '--batch-id', 'B1', '--session-mode', 'reuse-auth'], {}),
     (error) => error?.code === 'CONFIG_INVALID' && /--storage-state-out/.test(error.message),
   );
+  assert.throws(
+    () => parseArgs(['--case-id', '100:CASE_001', '--batch-id', 'B1', '--session-mode', 'reuse-browser', '--video', 'off'], {}),
+    (error) => error?.code === 'CONFIG_INVALID' && /managed browser endpoint/.test(error.message),
+  );
+  const sharedBrowserConfig = parseArgs([
+    '--case-id', '100:CASE_001',
+    '--batch-id', 'B1',
+    '--session-mode', 'reuse-browser',
+    '--video', 'retain-on-failure',
+  ], {
+    CUECAST_ADMIN_API: 'false',
+    SAKURA_PLAYWRIGHT_BROWSER_SESSION_ENDPOINT: 'ws://127.0.0.1/session',
+  });
+  assert.equal(sharedBrowserConfig.video, 'retain-on-failure');
+  assert.throws(
+    () => parseArgs(['--case-id', '100:CASE_001', '--admin-api', 'true'], {}),
+    (error) => error?.code === 'CONFIG_INVALID' && /project-environment-id/.test(error.message),
+  );
 });
 
 test('storage state loads valid JSON and rejects broken files', async () => {
@@ -530,6 +586,26 @@ test('storage state metadata resumes the previous business page without entering
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }
+});
+
+test('shared browser navigation keeps a business page and reloads an authentication page', () => {
+  assert.deepEqual(
+    resolveSharedBrowserStart('https://example.test/login', 'https://example.test/workspace'),
+    {
+      url: 'https://example.test/workspace',
+      navigate: false,
+      resumed: true,
+      reason: 'reuse-current-page',
+    },
+  );
+  assert.equal(
+    resolveSharedBrowserStart('https://example.test/login', 'https://example.test/login').reason,
+    'shared-browser-authentication-reload',
+  );
+  assert.equal(
+    resolveSharedBrowserStart('https://example.test/login', 'about:blank').reason,
+    'shared-browser-initial-navigation',
+  );
 });
 
 test('run artifacts use project version scene case date and time hierarchy', async () => {

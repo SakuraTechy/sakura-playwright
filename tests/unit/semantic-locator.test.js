@@ -71,12 +71,13 @@ test('semantic selection only auto-picks a separated high-confidence target', ()
 });
 
 test('runner keeps legacy by default and parses nullable page error override', () => {
-  const legacy = parseArgs(['--case-id', '100:CASE_001'], {});
+  const legacy = parseArgs(['--case-id', '100:CASE_001', '--admin-api', 'false'], {});
   assert.equal(legacy.locatorMode, 'legacy');
   assert.equal(legacy.pageErrorCheckEnabled, null);
 
   const semantic = parseArgs([
     '--case-id', '100:CASE_001',
+    '--admin-api', 'false',
     '--locator-mode', 'semantic-v1',
     '--page-error-check-enabled', 'false',
   ], {});

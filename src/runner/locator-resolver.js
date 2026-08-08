@@ -50,7 +50,13 @@ const TABLE_WRAPPERS = {
 
 export async function resolveLocator(page, step, options = {}) {
   if (options.locatorMode === 'semantic-v1') {
-    return resolveSemanticLocator(page, step, options, parseLocatorMeta(step.locator_meta));
+    try {
+      return await resolveSemanticLocator(page, step, options, parseLocatorMeta(step.locator_meta));
+    } catch (error) {
+      // 可见性断言需要区分“唯一节点已挂载但隐藏”和“节点不存在”。
+      // 仅该调用显式允许回退，点击和输入仍坚持选择可见目标。
+      if (!options.allowHidden) throw error;
+    }
   }
   return resolveLegacyLocator(page, step, options);
 }
@@ -361,6 +367,9 @@ async function settleLocator({ page, locator, source, locatorType, locatorValue,
         candidates: await summarizeCandidates(locator, visibleIndexes),
       }),
     };
+  }
+  if (options.allowHidden && count === 1) {
+    return makeSuccess(locator.first(), scopedSource, locatorType, locatorValue, count, 0);
   }
   return { ok: false };
 }

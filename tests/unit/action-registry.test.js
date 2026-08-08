@@ -10,7 +10,7 @@ import {
 
 test('canonical registry reports every action currently dispatched by the Playwright Runner', () => {
   assert.deepEqual([...PLAYWRIGHT_ACTION_TYPES].sort(), [
-    'assert_attribute', 'assert_database_value', 'assert_download', 'assert_json', 'assert_request', 'assert_request_count', 'assert_response',
+    'assert_attribute', 'assert_database_value', 'assert_download', 'assert_element_match', 'assert_json', 'assert_request', 'assert_request_count', 'assert_response',
     'assert_script', 'assert_text', 'assert_text_not', 'assert_text_regex', 'assert_variable_list',
     'assert_variable_list_not', 'captcha_ocr', 'certificate_upload', 'clear', 'click',
     'click_open_page', 'close_all_pages', 'close_page', 'combo_select', 'database_native', 'database_sql',
@@ -71,6 +71,38 @@ test('capability registration is admin-only and sends the canonical capability p
       actions: capabilities.actions,
       features: capabilities.features,
     });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('external runner signs Admin requests with the application Access Key', async () => {
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = '';
+  globalThis.fetch = async (url) => {
+    requestedUrl = String(url);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ code: 0, data: { accepted: true } }),
+    };
+  };
+  try {
+    const client = new ApiClient({
+      apiBase: 'http://127.0.0.1:8000',
+      adminApi: true,
+      accessKey: 'runner-access-key',
+      secretKey: 'runner-secret-key',
+    });
+    await client.registerOperationCapabilities(getPlaywrightCapabilities({
+      executorInstanceId: 'runner-node-1',
+      projectEnvironmentId: '47',
+    }));
+    const url = new URL(requestedUrl);
+    assert.equal(url.searchParams.get('accessKey'), 'runner-access-key');
+    assert.ok(url.searchParams.get('timestamp'));
+    assert.equal(url.searchParams.get('nonce')?.length, 32);
+    assert.match(url.searchParams.get('sign') || '', /^[a-f0-9]{32}$/);
   } finally {
     globalThis.fetch = originalFetch;
   }

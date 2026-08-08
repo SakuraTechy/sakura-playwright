@@ -12,6 +12,10 @@ const STEP_METADATA_KEYS = new Set([
   'schema_version',
   'catalog_version',
   'canonical_digest',
+  'original_action_type',
+  'recording_source',
+  // 目录表单的帮助、占位符和选项是诊断元数据，不是执行参数。
+  'diagnostic_fields',
 ]);
 
 /**
@@ -66,10 +70,12 @@ export class VariableContext {
   }
 
   resolveText(text) {
-    if (typeof text !== 'string' || !text.includes('${')) return text;
-    const wholeReference = text.match(/^\$\{([^{}]+)}$/);
+    if (typeof text !== 'string' || (!text.includes('${') && !text.includes('{{'))) return text;
+    const wholeReference = text.match(/^\$\{([^{}]+)}$/) || text.match(/^\{\{([^{}]+)}}$/);
     if (wholeReference) return this.get(wholeReference[1].trim());
-    return text.replace(/\$\{([^{}]+)}/g, (_all, expression) => stringifyVariable(this.get(String(expression).trim())));
+    return text.replace(/\$\{([^{}]+)}|\{\{([^{}]+)}}/g, (_all, canonical, cuecast) => (
+      stringifyVariable(this.get(String(canonical ?? cuecast).trim()))
+    ));
   }
 
   resolveStep(step) {
@@ -90,6 +96,29 @@ export class VariableContext {
       bindings[parsed.root] = this.get(parsed.root);
     }
     return bindings;
+  }
+
+  describeReferencesForStep(step) {
+    return this.referencesInStep(step).map((reference) => {
+      const parsed = this.parseReference(reference);
+      const metadata = this.metadata.get(parsed.root) || {};
+      const masked = Boolean(metadata.masked);
+      let valuePreview;
+      if (!masked) {
+        try {
+          valuePreview = preview(this.get(reference));
+        } catch {
+          // 缺失变量由 bindingsForStep 抛出；这里保留引用诊断，避免掩盖真实错误。
+        }
+      }
+      return {
+        reference,
+        variable_name: parsed.root,
+        value_masked: masked ? 1 : 0,
+        ...(valuePreview != null ? { value_preview: valuePreview } : {}),
+        source: metadata.source || '',
+      };
+    });
   }
 
   describe(name) {
@@ -164,8 +193,8 @@ function resolveRuntimeValue(value, variableContext, isRoot = false) {
 
 function collectReferences(value, references, isRoot = false) {
   if (typeof value === 'string') {
-    for (const match of value.matchAll(/\$\{([^{}]+)}/g)) {
-      references.add(String(match[1]).trim());
+    for (const match of value.matchAll(/\$\{([^{}]+)}|\{\{([^{}]+)}}/g)) {
+      references.add(String(match[1] ?? match[2]).trim());
     }
     return;
   }

@@ -245,6 +245,14 @@ node src/batch.js --case-ids 278,280 --api-base http://127.0.0.1:4173/api --work
 - `summary.json` 中 `280` 为 `failed`。
 - `280` 的 run 目录中能看到失败截图、失败 HTML、result。
 
+同一浏览器窗口串行执行：
+
+```powershell
+node src/batch.js --case-ids <ids> --api-base <apiBase> --workers 1 --session-mode reuse-browser --video retain-on-failure --headed true
+```
+
+`reuse-browser` 只在同一批次内复用 Browser、Context、标签页、sessionStorage 和页面内存。首条用例打开录制起点；后续用例若仍在同源非登录业务页，则直接从当前页面继续。跨域、当前处于登录页、用例失败、取消或批次结束时不会沿用该页面状态。录屏可选 `on`、`off` 或 `retain-on-failure`；Runner 会在不关闭共享窗口的情况下为每条用例单独生成 WebM。
+
 ## 查看执行产物
 
 单用例产物目录：
@@ -482,7 +490,7 @@ node src/batch.js --case-ids 278,279 --api-base http://127.0.0.1:4173/api --work
 | --- | --- | --- |
 | `--case-ids` | 逗号分隔 case ID | 可由 `CUECAST_CASE_IDS` 提供 |
 | `--workers` | case 级并发数 | `1` |
-| `--session-mode` | `isolated` 隔离执行；`reuse-auth` 串行复用认证状态 | `isolated` |
+| `--session-mode` | `isolated` 隔离执行；`reuse-auth` 串行复用认证状态；`reuse-browser` 串行复用同一浏览器窗口 | `isolated` |
 | `--storage-state` | 单用例或批次的只读初始 storage state | 空 |
 | `--api-base` | API 地址 | `http://127.0.0.1:4173/api` |
 | `--artifact-dir` | 产物根目录 | `artifacts` |
@@ -497,7 +505,7 @@ CUECAST_TOKEN          后端鉴权 token
 CUECAST_PROJECT_ENVIRONMENT_ID admin 产品环境 ID
 CUECAST_STORAGE_STATE  导出脚本或真实环境使用的 storage state 文件
 RUNNER_WORKERS         批量 worker 数
-RUNNER_SESSION_MODE    isolated | reuse-auth
+RUNNER_SESSION_MODE    isolated | reuse-auth | reuse-browser
 RUNNER_STORAGE_STATE   单用例或批次的只读初始 storage state 文件
 RUNNER_BROWSER         chromium | firefox | webkit
 RUNNER_LOCATOR_MODE    legacy | semantic-v1
@@ -516,6 +524,8 @@ RUNNER_CASE_TIMEOUT_MS 单 case 超时
 `reuse-auth` 仅允许串行批次（`workers=1`）。它复用 Cookie、localStorage、IndexedDB，以及最终页面同源的 sessionStorage 快照；不复用页面内存或 WebSocket 会话。平台批次的 `--storage-state-out` 只能由 admin 后端注入，认证文件不会进入 artifact、场景记录或前端请求；批次正常完成或取消后会被清理。
 
 如果下一条用例的录制起点仍是 `/login`、`/login1`、`/signin` 等登录路由，Runner 会在同源且上一条成功用例已进入非登录页面时恢复上一条最终业务页。普通业务起点、跨域地址和 `isolated` 模式不应用该规则。
+
+`reuse-browser` 同样仅允许串行批次（`workers=1`）。它由 admin 或批量 CLI 启动独立宿主，持有同一个 Browser、Context 和页面；每条用例仍使用独立 Runner 进程、Trace、截图、结果与取消状态。`video=on|off|retain-on-failure` 均受支持，录屏由每条 Runner 在共享 Page 上独立启停 screencast，形成按用例分段的 WebM，不需要关闭 Context。宿主连接端点仅绑定本机并通过子进程环境变量传递，不进入命令日志或前端响应。
 
 会话复用排查日志位于：
 

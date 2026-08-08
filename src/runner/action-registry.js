@@ -6,7 +6,7 @@ const configuredCatalogVersion = String(process.env.AUTOMATION_OPERATION_CATALOG
 const configuredRunnerVersion = String(process.env.PLAYWRIGHT_RUNNER_VERSION || '').trim();
 
 // 与 Admin automation-operation-catalog.json 保持一致；目录版本不一致时 Admin 会拒绝覆盖能力快照。
-export const OPERATION_CATALOG_VERSION = configuredCatalogVersion || '2026-07-30.1';
+export const OPERATION_CATALOG_VERSION = configuredCatalogVersion || '2026-08-07.1';
 export const PLAYWRIGHT_RUNNER_VERSION = configuredRunnerVersion || String(packageInfo.version || '').trim() || 'unknown';
 
 /**
@@ -56,6 +56,7 @@ export const PLAYWRIGHT_ACTION_REGISTRY = Object.freeze([
   { actionType: 'assert_attribute', execution: 'browser' },
   { actionType: 'assert_script', execution: 'browser' },
   { actionType: 'assert_text_regex', execution: 'browser' },
+  { actionType: 'assert_element_match', execution: 'browser' },
   { actionType: 'implicit_wait', execution: 'browser' },
   { actionType: 'pointer_move', execution: 'browser' },
   { actionType: 'global_variable_set', execution: 'runner-local' },

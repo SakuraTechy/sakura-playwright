@@ -11,12 +11,14 @@ import { LOADING_WAIT_WALL_MS, resolvePageErrorCheckEnabled } from './runner/pag
 import { createBrowserActionContext, runStep } from './runner/step-runner.js';
 import { createInfrastructureTaskCancellation, hasBrowserSteps } from './runner/infrastructure-step-runner.js';
 import { createVariableContext } from './runner/variable-context.js';
+import { attachOperationDiagnosticIfEnabled } from './runner/operation-diagnostics.js';
 import { getPlaywrightCapabilities } from './runner/action-registry.js';
 import {
   captureSessionStorage,
   isLikelyAuthenticationUrl,
   loadStorageStateBundle,
   redactSensitiveCliArgs,
+  resolveSharedBrowserStart,
   resolveSessionStartUrl,
   restoreSessionStorage,
   safeUrlForLog,
@@ -25,6 +27,7 @@ import {
 } from './runner/session-state.js';
 import {
   collectFailureArtifacts,
+  collectScreencastArtifact,
   collectVideoArtifact,
   createRunArtifacts,
   writeConsoleLog,
@@ -61,14 +64,19 @@ const focusExtensionPath = path.resolve(__dirname, '..', 'tools', 'focus-extensi
 
 async function main() {
   const config = parseArgs();
+  const sharedBrowserSession = config.sessionMode === 'reuse-browser';
   const startedAt = Date.now();
   let localLogPath = '';
   const executionLogger = createExecutionLogger(console.log);
   const api = new ApiClient({
     apiBase: config.apiBase,
     token: config.token,
+    accessKey: config.accessKey,
+    secretKey: config.secretKey,
     adminApi: config.adminApi,
     projectEnvironmentId: config.projectEnvironmentId,
+    batchId: config.batchId,
+    executionCapability: config.executionCapability,
   });
   const infrastructureTasks = createInfrastructureTaskCancellation(api, executionLogger);
   let artifacts;
@@ -78,6 +86,7 @@ async function main() {
   let context;
   let page;
   let activePage;
+  let sharedScreencastPage;
   let liveFramePublisher;
   let actionPreviewWarningReported = false;
   const browserActionContext = createBrowserActionContext({ defaultTimeoutMs: config.timeoutMs });
@@ -175,7 +184,13 @@ async function main() {
 
     executionLogger.info('browser', '正在初始化 Playwright 浏览器');
 
-    if (shouldUseFocusExtension(config)) {
+    if (sharedBrowserSession) {
+      browser = await browserTypes[config.browser].connect(config.browserSessionEndpoint);
+      context = browser.contexts()[0];
+      if (!context) {
+        throw new RunnerError('BROWSER_SESSION_INVALID', 'Managed browser session has no shared context');
+      }
+    } else if (shouldUseFocusExtension(config)) {
       await fs.mkdir(path.join(artifacts.runDir, 'browser-profile'), { recursive: true });
       launchArgs.push(
         `--disable-extensions-except=${focusExtensionPath}`,
@@ -206,7 +221,16 @@ async function main() {
     if (shouldStartTrace(config.trace)) {
       await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
     }
-    page = context.pages().find((candidate) => !candidate.isClosed()) || await context.newPage();
+    const openPages = context.pages().filter((candidate) => !candidate.isClosed());
+    page = (sharedBrowserSession ? openPages.at(-1) : openPages[0]) || await context.newPage();
+    if (sharedBrowserSession && viewport) {
+      await page.setViewportSize(viewport);
+    }
+    if (sharedBrowserSession && shouldRecordVideo(config.video)) {
+      // 共享页面不能通过关闭 Context 来分割原生录像；Screencast 可按用例启停且不破坏页面状态。
+      await page.screencast.start({ path: artifacts.videoPath });
+      sharedScreencastPage = page;
+    }
     attachPageDiagnostics(page, consoleEvents);
     attachNetworkRecorder(page, networkEvents);
     activePage = page;
@@ -222,14 +246,16 @@ async function main() {
       await page.bringToFront().catch(() => {});
       console.log('[runner] headed page ready');
     }
-    const sessionStart = resolveSessionStartUrl(
-      testCase.start_url,
-      storageStateBundle.metadata.lastUrl,
-      {
-        sessionMode: config.sessionMode,
-        authStateLoaded: Boolean(storageState),
-      },
-    );
+    const sessionStart = sharedBrowserSession
+      ? resolveSharedBrowserStart(testCase.start_url, page.url())
+      : resolveSessionStartUrl(
+        testCase.start_url,
+        storageStateBundle.metadata.lastUrl,
+        {
+          sessionMode: config.sessionMode,
+          authStateLoaded: Boolean(storageState),
+        },
+      );
     result.raw.session_navigation_resumed = sessionStart.resumed;
     result.raw.session_navigation_reason = sessionStart.reason;
     executionLogger.info(
@@ -237,17 +263,19 @@ async function main() {
       `起始页决策=${sessionStart.reason}，录制地址=${safeUrlForLog(testCase.start_url)}，实际地址=${safeUrlForLog(sessionStart.url)}`,
       true,
     );
-    const navigationResponse = await withTimeout(
-      page.goto(sessionStart.url, { waitUntil: 'domcontentloaded', timeout: config.timeoutMs }),
-      config.timeoutMs,
-      'Initial navigation',
-    );
+    const navigationResponse = sessionStart.navigate === false
+      ? null
+      : await withTimeout(
+        page.goto(sessionStart.url, { waitUntil: 'domcontentloaded', timeout: config.timeoutMs }),
+        config.timeoutMs,
+        'Initial navigation',
+      );
     const actualStartUrl = safeUrlForLog(page.url());
     const restoredSessionStorageEntries = await page.evaluate(() => sessionStorage.length).catch(() => 0);
     result.raw.session_storage_restored_count = restoredSessionStorageEntries;
     executionLogger.success(
       'navigation',
-      `起始页面加载完成，当前地址=${actualStartUrl}，HTTP=${navigationResponse?.status() ?? '-'}，sessionStorage=${restoredSessionStorageEntries}`,
+      `起始页面${sessionStart.navigate === false ? '已复用' : '加载完成'}，当前地址=${actualStartUrl}，HTTP=${navigationResponse?.status() ?? '-'}，sessionStorage=${restoredSessionStorageEntries}`,
     );
     if (registeredSessionStorageEntries > 0
       && restoredSessionStorageEntries < registeredSessionStorageEntries) {
@@ -278,19 +306,25 @@ async function main() {
     for (let stepPosition = 0; stepPosition < testCase.steps.length; stepPosition += 1) {
       const step = testCase.steps[stepPosition];
       const nextStep = testCase.steps[stepPosition + 1];
-      // 执行前生成运行时副本，绝不能把变量替换结果写回 Admin 获取的原始 case snapshot。
-      const runtimeBindings = variableContext.bindingsForStep(step);
-      const runtimeStep = variableContext.resolveStep(step);
-      // 只有下拉输入和弹窗预注册会读取下一步骤；不要提前解析普通下一步，
-      // 否则“当前写变量、下一步读变量”会在写入前错误失败。
-      const runtimeNextStep = requiresResolvedNextStep(runtimeStep, nextStep)
-        ? variableContext.resolveStep(nextStep)
-        : nextStep;
       const stepStartedAt = Date.now();
       const stepLogLabel = formatStepLogLabel(step);
+      // 解析失败也必须归属当前步骤，不能在步骤日志和失败结果之外直接中断 Runner。
+      let runtimeBindings = {};
+      let runtimeVariableReferences = [];
+      let runtimeStep = step;
+      let runtimeNextStep = nextStep;
       executionLogger.info('step', `${stepLogLabel}，开始执行`);
       executionLogger.info('step', `${stepLogLabel}，动作类型=${step.action_type || 'custom'}`, true);
       try {
+        // 执行前生成运行时副本，绝不能把变量替换结果写回 Admin 获取的原始 case snapshot。
+        runtimeVariableReferences = variableContext.describeReferencesForStep(step);
+        runtimeBindings = variableContext.bindingsForStep(step);
+        runtimeStep = variableContext.resolveStep(step);
+        // 只有下拉输入和弹窗预注册会读取下一步骤；不要提前解析普通下一步，
+        // 否则“当前写变量、下一步读变量”会在写入前错误失败。
+        runtimeNextStep = requiresResolvedNextStep(runtimeStep, nextStep)
+          ? variableContext.resolveStep(nextStep)
+          : nextStep;
         const stepResult = await withTimeout(runStep(activePage, testCase, runtimeStep, {
           timeoutMs: config.timeoutMs,
           locatorMode: config.locatorMode,
@@ -319,6 +353,9 @@ async function main() {
             actionPreviewWarningReported = true;
             executionLogger.warning('live', `动作可视化暂不可用：${error?.message || String(error)}`);
           },
+          onWaitCountdown: (remainingSeconds) => {
+            executionLogger.info('step', `${stepLogLabel}，正在执行：倒计时<${remainingSeconds}s>`);
+          },
           api,
           browserContext: browserActionContext,
           variableContext,
@@ -330,6 +367,7 @@ async function main() {
             caseKey: testCase.id || config.caseId,
             projectEnvironmentId: config.projectEnvironmentId,
             definitionVersion: testCase.definition_version || testCase.definitionVersion || '',
+            executionCapability: config.executionCapability,
           },
           infrastructureTasks,
           infrastructurePollIntervalMs: config.infrastructurePollIntervalMs,
@@ -347,7 +385,11 @@ async function main() {
           if (config.headed && activePage) await activePage.bringToFront().catch(() => {});
         }
         applyInfrastructureVariables(runtimeStep, stepResult, variableContext);
-        result.steps.push(stepResult);
+        attachStepVariableReferences(stepResult, runtimeVariableReferences);
+        result.steps.push(attachOperationDiagnosticIfEnabled(stepResult, step, runtimeStep, {
+          executor: 'playwright',
+          enabled: config.operationDiagnosticEnabled,
+        }));
         executionLogger.success(
           'step',
           `${stepLogLabel}，执行成功，耗时 ${stepResult.duration_ms ?? Date.now() - stepStartedAt}ms`,
@@ -364,6 +406,16 @@ async function main() {
         }
       } catch (error) {
         markStepFailed(result, step, error, stepStartedAt);
+        const failedStep = result.steps.at(-1);
+        attachStepVariableReferences(failedStep, runtimeVariableReferences);
+        if (failedStep) {
+          result.steps[result.steps.length - 1] = attachOperationDiagnosticIfEnabled(
+            failedStep,
+            step,
+            runtimeStep,
+            { executor: 'playwright', enabled: config.operationDiagnosticEnabled },
+          );
+        }
         executionLogger.error('step', `${stepLogLabel}，执行失败：${error?.message || String(error)}`);
         throw error;
       }
@@ -375,8 +427,11 @@ async function main() {
       onTimeout: async () => {
         caseTimedOut = true;
         await infrastructureTasks.cancelActive('case_timeout');
-        if (context) await context.close().catch(() => {});
-        if (browser) await browser.close().catch(() => {});
+        if (sharedScreencastPage) {
+          await sharedScreencastPage.screencast.stop().catch(() => {});
+          sharedScreencastPage = undefined;
+        }
+        await closeBrowserResources(browser, context, sharedBrowserSession);
       },
     });
   } catch (error) {
@@ -431,9 +486,20 @@ async function main() {
       await context.tracing.stop(keepTrace ? { path: artifacts.tracePath } : {}).catch(() => {});
       if (keepTrace) result.artifacts.trace = artifacts.tracePath;
     }
-    if (context) await context.close().catch(() => {});
-    await collectVideoArtifact(activePage || page, result, shouldKeepArtifact(config.video, result.success)).catch(() => {});
-    if (browser) await browser.close().catch(() => {});
+    if (sharedBrowserSession) {
+      if (sharedScreencastPage) {
+        await sharedScreencastPage.screencast.stop().catch((error) => {
+          result.artifacts.video_error = error?.message || String(error);
+        });
+      }
+      await collectScreencastArtifact(artifacts.videoPath, result, shouldKeepArtifact(config.video, result.success));
+      // 远程 Browser.close 只断开当前 Runner；Context 和页面仍由批次宿主持有。
+      if (browser) await browser.close().catch(() => {});
+    } else {
+      if (context) await context.close().catch(() => {});
+      await collectVideoArtifact(activePage || page, result, shouldKeepArtifact(config.video, result.success)).catch(() => {});
+      if (browser) await browser.close().catch(() => {});
+    }
     finalizeRunResult(result, startedAt);
     if (result.success) {
       executionLogger.success('runner', `Runner 执行完成，耗时 ${result.duration_ms}ms`);
@@ -541,6 +607,15 @@ function shouldUseFocusExtension(config) {
   return config.headed && config.browser === 'chromium' && !config.storageState;
 }
 
+async function closeBrowserResources(browser, context, sharedBrowserSession) {
+  if (sharedBrowserSession) {
+    if (browser) await browser.close().catch(() => {});
+    return;
+  }
+  if (context) await context.close().catch(() => {});
+  if (browser) await browser.close().catch(() => {});
+}
+
 function shouldKeepArtifact(mode, success) {
   const raw = String(mode || '').toLowerCase();
   if (raw === 'on') return true;
@@ -638,9 +713,10 @@ async function registerOperationCatalogCapabilities(api, executionLogger, config
     await api.registerOperationCapabilities(capabilities);
     executionLogger.info(
       'capability',
-      `已上报 Playwright Runner 能力，版本=${capabilities.executorVersion}，action=${capabilities.actions.length}`,
+      `已上报 Playwright Runner 能力，实例=${capabilities.executorInstanceId}，版本=${capabilities.executorVersion}，目录=${capabilities.catalogVersion}，action=${capabilities.actions.length}`,
       true,
     );
+    executionLogger.info('capability', `action清单=${capabilities.actions.join(', ')}`, true);
   } catch (error) {
     // 旧 Admin 尚未提供能力目录接口时不能阻断现有执行、报告和 Jenkins 链路。
     executionLogger.warning(
@@ -659,8 +735,8 @@ function requiresResolvedNextStep(step, nextStep) {
 }
 
 /**
- * Agent 的变量结果不能进入报告或日志；只接受当前步骤显式声明的变量名。
- * 这使数据库查询、文件查找和节点信息可供后续步骤使用，同时避免 Agent 返回任意键污染用例上下文。
+ * Agent 的原始变量结果不能进入报告或日志；只接受当前步骤显式声明的变量名。
+ * 写入 VariableContext 后，仅把脱敏、截断后的描述加入步骤结果。
  */
 function applyInfrastructureVariables(step, stepResult, variableContext) {
   const variables = stepResult._runtime_variables;
@@ -668,11 +744,37 @@ function applyInfrastructureVariables(step, stepResult, variableContext) {
   if (!variables || typeof variables !== 'object') return;
   const variableName = String(step?.variable_name || step?.result_binding || '').trim();
   if (!variableName || !Object.prototype.hasOwnProperty.call(variables, variableName)) return;
-  variableContext.set(variableName, variables[variableName], {
+  const variable = variableContext.set(variableName, variables[variableName], {
     masked: step?.value_masked === true || step?.value_masked === 'true' || step?.value_masked === 1 || step?.value_masked === '1',
     overwrite: step?.overwrite !== false && step?.overwrite !== 'false',
     source: 'infrastructure',
   });
+  attachStepVariableResult(stepResult, variable);
+}
+
+function attachStepVariableResult(stepResult, variable) {
+  if (!stepResult || !variable?.variable_name) return;
+  const safeVariable = {
+    variable_name: variable.variable_name,
+    value_masked: variable.value_masked,
+    ...(variable.value_preview != null ? { value_preview: variable.value_preview } : {}),
+    source: variable.source || '',
+  };
+  stepResult.variable_name = safeVariable.variable_name;
+  stepResult.value_masked = safeVariable.value_masked;
+  if (safeVariable.value_preview != null) stepResult.value_preview = safeVariable.value_preview;
+  stepResult.details = {
+    ...(stepResult.details && typeof stepResult.details === 'object' ? stepResult.details : {}),
+    variable: safeVariable,
+  };
+}
+
+function attachStepVariableReferences(stepResult, references) {
+  if (!stepResult || !Array.isArray(references) || references.length === 0) return;
+  stepResult.details = {
+    ...(stepResult.details && typeof stepResult.details === 'object' ? stepResult.details : {}),
+    variable_references: references,
+  };
 }
 
 main().catch((error) => {
