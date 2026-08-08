@@ -38,6 +38,7 @@ test('platform CLI options override runner environment defaults', () => {
     '--job-id', 'JOB-20260717-0001',
     '--execution-id', 'EXEC-20260717-0001',
     '--project-environment-id', '47',
+    '--browser-executable-path', 'C:\\Browsers\\chromium.exe',
     '--headed', 'true',
     '--ignore-https-errors', 'false',
     '--live-frame-quality', 'high',
@@ -49,6 +50,7 @@ test('platform CLI options override runner environment defaults', () => {
   ], {
     RUNNER_HEADED: 'false',
     RUNNER_IGNORE_HTTPS_ERRORS: 'true',
+    RUNNER_BROWSER_EXECUTABLE_PATH: 'C:\\Browsers\\environment.exe',
   });
 
   assert.equal(config.projectEnvironmentId, '47');
@@ -56,6 +58,7 @@ test('platform CLI options override runner environment defaults', () => {
   assert.equal(config.runId, 'RUN-20260717-0001');
   assert.equal(config.jobId, 'JOB-20260717-0001');
   assert.equal(config.executionId, 'EXEC-20260717-0001');
+  assert.equal(config.browserExecutablePath, 'C:\\Browsers\\chromium.exe');
   assert.equal(config.headed, true);
   assert.equal(config.ignoreHttpsErrors, false);
   assert.equal(config.liveFrameQuality, 'high');
@@ -64,6 +67,17 @@ test('platform CLI options override runner environment defaults', () => {
   assert.equal(config.trace, 'on');
   assert.equal(config.video, 'off');
   assert.equal(config.caseTimeoutMs, 120000);
+});
+
+test('runner accepts a browser executable path from the environment', () => {
+  const config = parseArgs(['--case-id', '100:CASE_001'], {
+    RUNNER_BROWSER_EXECUTABLE_PATH: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+  });
+
+  assert.equal(
+    config.browserExecutablePath,
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+  );
 });
 
 test('live frame quality presets balance resolution compression and refresh interval', () => {

@@ -54,6 +54,8 @@ SAKURA_PLAYWRIGHT_RUNNER_MAX_CONCURRENT=2
 
 admin 仅负责定位并启动 Runner、限制并发、注入当前登录用户的短期 Bearer Token。服务地址、产物目录等节点参数配置在 `.env`；浏览器、无头模式、实时画面质量、HTTPS 证书策略、超时和 trace/video 策略由平台任务白名单参数覆盖。admin 服务节点需要满足 Node.js、Runner 依赖和 Playwright 浏览器已安装。
 
+浏览器下载受限的节点可以在 Runner `.env` 配置 `RUNNER_BROWSER_EXECUTABLE_PATH`，指向与 `RUNNER_BROWSER` 匹配的已安装浏览器绝对路径。例如 Windows 系统 Chrome 可配合 `RUNNER_BROWSER=chromium` 使用。未配置时仍使用 Playwright 管理的浏览器，不要把开发机路径写入 `.env.example`。
+
 ### 启动检查与故障定位
 
 修改 admin 后端或前端代码后必须重启 admin 后端并重新发布前端；旧进程访问 `/api/automation/playwright/runner/jobs` 返回 `404`，说明 Runner Controller 尚未加载，不是 Playwright 用例动作失败。
@@ -792,6 +794,7 @@ RUNNER_WORKERS         批量 worker 数，默认 1
 RUNNER_SESSION_MODE    isolated | reuse-auth，默认 isolated
 RUNNER_STORAGE_STATE   单用例或批次的只读初始 storage state 文件
 RUNNER_BROWSER         chromium | firefox | webkit，默认 chromium
+RUNNER_BROWSER_EXECUTABLE_PATH 可选浏览器可执行文件绝对路径
 RUNNER_LOCATOR_MODE    legacy | semantic-v1，默认 legacy
 RUNNER_PAGE_ERROR_CHECK_ENABLED 留空继承用例，true | false 为任务级覆盖
 RUNNER_HEADED          true | false，默认 false
@@ -824,6 +827,7 @@ admin 默认允许单文件 200MB；视频超过限制时应缩短用例、改�
 --case-id       用例 ID，必填
 --api-base      后端 API 地址，默认 http://127.0.0.1:4173/api
 --browser       chromium | firefox | webkit，默认 chromium
+--browser-executable-path 可选浏览器可执行文件绝对路径
 --locator-mode  legacy | semantic-v1，默认 legacy
 --page-error-check-enabled 留空继承用例，true | false 为任务级覆盖
 --headed        是否显示浏览器，默认 false

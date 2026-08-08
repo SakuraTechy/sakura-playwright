@@ -187,10 +187,12 @@ async function main() {
         headless: false,
         slowMo: config.slowMoMs,
         args: launchArgs,
+        ...(config.browserExecutablePath ? { executablePath: config.browserExecutablePath } : {}),
       });
     } else {
       const launchOptions = { headless: !config.headed, slowMo: config.slowMoMs };
       if (launchArgs.length) launchOptions.args = launchArgs;
+      if (config.browserExecutablePath) launchOptions.executablePath = config.browserExecutablePath;
       browser = await browserTypes[config.browser].launch(launchOptions);
       context = await browser.newContext(contextOptions);
     }

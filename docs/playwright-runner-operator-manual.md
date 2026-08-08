@@ -62,6 +62,8 @@ npm install
 npm exec -- playwright install chromium
 ```
 
+如果部署节点无法下载 Playwright 浏览器，可以在 Runner `.env` 中将 `RUNNER_BROWSER_EXECUTABLE_PATH` 设置为与 `RUNNER_BROWSER` 匹配的已安装浏览器绝对路径。Windows 系统 Chrome 可作为 `chromium` 的可执行文件；未配置时仍使用 Playwright 管理的浏览器。
+
 基础检查：
 
 ```powershell
@@ -459,6 +461,7 @@ node src/index.js --case-id 278 --api-base http://127.0.0.1:4173/api --headed fa
 | `--project-environment-id` | admin 产品环境 ID；admin 单用例任务必填 | 无 |
 | `--api-base` | API 地址 | `http://127.0.0.1:4173/api` |
 | `--browser` | `chromium`、`firefox`、`webkit` | `chromium` |
+| `--browser-executable-path` | 可选浏览器可执行文件绝对路径 | 空 |
 | `--locator-mode` | `legacy` 保持历史行为；`semantic-v1` 对齐录制定位语义 | `legacy` |
 | `--page-error-check-enabled` | 留空继承用例；`true`、`false` 显式覆盖 | 继承用例 |
 | `--headed` | 是否显示浏览器 | `false` |
@@ -500,6 +503,7 @@ RUNNER_WORKERS         批量 worker 数
 RUNNER_SESSION_MODE    isolated | reuse-auth
 RUNNER_STORAGE_STATE   单用例或批次的只读初始 storage state 文件
 RUNNER_BROWSER         chromium | firefox | webkit
+RUNNER_BROWSER_EXECUTABLE_PATH 可选浏览器可执行文件绝对路径
 RUNNER_LOCATOR_MODE    legacy | semantic-v1
 RUNNER_PAGE_ERROR_CHECK_ENABLED 留空继承用例，true | false 为任务级覆盖
 RUNNER_HEADED          true | false
@@ -603,6 +607,13 @@ CUECAST_TOKEN
 
 ```powershell
 npm exec -- playwright install chromium
+```
+
+如果浏览器下载持续失败，确认节点已有与 `RUNNER_BROWSER` 匹配的浏览器，然后在 `.env` 配置其绝对路径：
+
+```text
+RUNNER_BROWSER=chromium
+RUNNER_BROWSER_EXECUTABLE_PATH=C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe
 ```
 
 用例没有回到初始状态：

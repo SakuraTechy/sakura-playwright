@@ -31,14 +31,25 @@ export function hasBrowserSteps(steps) {
  */
 export function createInfrastructureTaskCancellation(api, logger = null) {
   const taskIds = new Set();
+  let cancellationReason = '';
   return {
     track(taskId) {
       if (taskId) taskIds.add(String(taskId));
+      return !cancellationReason;
     },
     complete(taskId) {
       if (taskId) taskIds.delete(String(taskId));
     },
+    throwIfCancelled(taskId) {
+      if (!cancellationReason) return;
+      throw new RunnerError(
+        'INFRASTRUCTURE_STEP_CANCELLED',
+        `Infrastructure task polling cancelled: ${cancellationReason}`,
+        { infrastructure_task_id: String(taskId || '') },
+      );
+    },
     async cancelActive(reason = 'runner_cancelled') {
+      cancellationReason = String(reason || 'runner_cancelled');
       const active = [...taskIds];
       taskIds.clear();
       await Promise.all(active.map(async (taskId) => {
@@ -90,19 +101,26 @@ export async function runInfrastructureStep(testCase, step, options = {}) {
     });
   }
 
-  options.infrastructureTasks?.track(taskId);
+  const tracked = options.infrastructureTasks?.track(taskId);
   let afterSequence = -1;
   const seenLogSequences = new Set();
   try {
+    if (tracked === false) {
+      await api.cancelInfrastructureTask(taskId, 'runner_cancelled').catch(() => {});
+    }
+    options.infrastructureTasks?.throwIfCancelled(taskId);
     let current = task;
     while (true) {
+      options.infrastructureTasks?.throwIfCancelled(taskId);
       emitTaskLogs(current, taskId, options, seenLogSequences);
       const status = normalizeStatus(current.status);
       if (isTerminalStatus(status)) {
         return buildTaskResult(step, taskId, current, status);
       }
       await sleep(resolvePollIntervalMs(options));
+      options.infrastructureTasks?.throwIfCancelled(taskId);
       current = unwrapTask(await api.getInfrastructureTask(taskId, afterSequence));
+      options.infrastructureTasks?.throwIfCancelled(taskId);
       afterSequence = nextSequence(current, afterSequence);
     }
   } finally {

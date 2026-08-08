@@ -32,6 +32,7 @@ export function parseArgs(argv = process.argv.slice(2), env = process.env) {
     adminApi: parseBoolean(args['admin-api'] ?? (args['api-base'] == null ? mergedEnv.CUECAST_ADMIN_API : false), false),
     token: args.token || mergedEnv.CUECAST_TOKEN || '',
     browser: args.browser || mergedEnv.RUNNER_BROWSER || 'chromium',
+    browserExecutablePath: args['browser-executable-path'] || mergedEnv.RUNNER_BROWSER_EXECUTABLE_PATH || '',
     liveFrameQuality: args['live-frame-quality'] || mergedEnv.RUNNER_LIVE_FRAME_QUALITY || 'smooth',
     headed: parseBoolean(args.headed ?? mergedEnv.RUNNER_HEADED, false),
     ignoreHttpsErrors: parseBoolean(args['ignore-https-errors'] ?? mergedEnv.RUNNER_IGNORE_HTTPS_ERRORS, false),

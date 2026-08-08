@@ -129,3 +129,35 @@ test('tracked infrastructure tasks are cancelled when the runner aborts', async 
   await tracker.cancelActive('case_timeout');
   assert.deepEqual(cancelled, [{ taskId: 'INFRA_003', reason: 'case_timeout' }]);
 });
+
+test('cancelling active infrastructure work stops the local polling loop', async () => {
+  let reads = 0;
+  let resolveFirstRead;
+  const firstRead = new Promise((resolve) => { resolveFirstRead = resolve; });
+  const api = {
+    adminApi: true,
+    createInfrastructureTask: async () => ({ task_id: 'INFRA_POLLING', status: 'queued' }),
+    getInfrastructureTask: async () => {
+      reads += 1;
+      resolveFirstRead();
+      return { task_id: 'INFRA_POLLING', status: 'running' };
+    },
+    cancelInfrastructureTask: async () => {},
+  };
+  const tracker = createInfrastructureTaskCancellation(api);
+  const execution = runInfrastructureStep({ id: 'SCENE:CASE' }, {
+    id: 'STEP_POLLING', step_index: 0, action_type: 'server_command', wait_before: 0,
+  }, {
+    api,
+    infrastructureTasks: tracker,
+    infrastructureExecution: { caseKey: 'SCENE:CASE' },
+    infrastructurePollIntervalMs: 100,
+  });
+
+  await firstRead;
+  await tracker.cancelActive('step_timeout');
+  await assert.rejects(execution, (error) => error?.code === 'INFRASTRUCTURE_STEP_CANCELLED');
+  const readsAfterCancellation = reads;
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(reads, readsAfterCancellation);
+});
