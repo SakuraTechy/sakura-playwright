@@ -33,6 +33,12 @@ export async function runStep(page, testCase, step, options = {}) {
     const localResult = await runLocalVariableAction(page, step, options);
     const variable = localResult.variable || {};
     const locatorInfo = localResult.locatorInfo;
+    const variableDetails = variable.variable_name ? {
+      variable_name: variable.variable_name,
+      value_masked: variable.value_masked,
+      ...(variable.value_preview != null ? { value_preview: variable.value_preview } : {}),
+      source: variable.source || '',
+    } : null;
     await sleep(options.afterStepDelayMs ?? 0);
     return {
       step_index: step.step_index,
@@ -53,6 +59,8 @@ export async function runStep(page, testCase, step, options = {}) {
         matched_count: locatorInfo.matchedCount ?? null,
         visible_count: locatorInfo.visibleCount ?? null,
       } : {}),
+      ...(variableDetails ? { details: { variable: variableDetails } } : {}),
+      ...(localResult.operation_assertion ? { operation_assertion: localResult.operation_assertion } : {}),
     };
   }
 
@@ -65,6 +73,7 @@ export async function runStep(page, testCase, step, options = {}) {
   }
   let locatorInfo = null;
   let extra = {};
+  let operationAssertion = null;
 
   await throwIfPageError(page, options.pageErrorCheckEnabled);
   if (!isDialogAction(action)) {
@@ -337,7 +346,8 @@ export async function runStep(page, testCase, step, options = {}) {
 
     case 'wait': {
       await showStepAction(page, step, null, options);
-      await sleep(Number(step.value) || step.wait_before || 1000);
+      const waitDurationMs = Number(step.value) || step.wait_before || 1000;
+      extra = { wait_duration_ms: await waitWithCountdown(waitDurationMs, options.onWaitCountdown) };
       break;
     }
 
@@ -352,21 +362,25 @@ export async function runStep(page, testCase, step, options = {}) {
     case 'assert_text': {
       locatorInfo = hasLocator(step) ? await resolveStepLocator(page, step, options) : null;
       await showStepAction(page, step, locatorInfo?.locator || null, options);
-      locatorInfo = await runAssertText(page, step, options, locatorInfo);
+      const assertionResult = await runAssertText(page, step, options, locatorInfo);
+      locatorInfo = assertionResult.locatorInfo;
+      operationAssertion = assertionResult.assertion;
       break;
     }
 
     case 'assert_text_not': {
       locatorInfo = hasLocator(step) ? await resolveStepLocator(page, step, options) : null;
       await showStepAction(page, step, locatorInfo?.locator || null, options);
-      locatorInfo = await runAssertTextNot(page, step, options, locatorInfo);
+      const assertionResult = await runAssertTextNot(page, step, options, locatorInfo);
+      locatorInfo = assertionResult.locatorInfo;
+      operationAssertion = assertionResult.assertion;
       break;
     }
 
     case 'assert_attribute': {
       locatorInfo = await resolveStepLocator(page, step, options);
       await showStepAction(page, step, locatorInfo.locator, options);
-      await assertAttribute(locatorInfo.locator, step, options);
+      operationAssertion = await assertAttribute(locatorInfo.locator, step, options);
       break;
     }
 
@@ -374,6 +388,7 @@ export async function runStep(page, testCase, step, options = {}) {
       await showStepAction(page, step, null, options);
       const actual = await executeBrowserScript(getActionRoot(page, options), scriptFromStep(step, 'assert_script'));
       assertValueEquals(actual, expectedFromStep(step), step, 'script result');
+      operationAssertion = createAssertion('脚本返回值', 'equals', expectedFromStep(step), actual);
       extra = { script_result_type: valueType(actual) };
       break;
     }
@@ -381,7 +396,19 @@ export async function runStep(page, testCase, step, options = {}) {
     case 'assert_text_regex': {
       locatorInfo = hasLocator(step) ? await resolveStepLocator(page, step, options) : null;
       await showStepAction(page, step, locatorInfo?.locator || null, options);
-      locatorInfo = await runAssertTextRegex(page, step, options, locatorInfo);
+      const assertionResult = await runAssertTextRegex(page, step, options, locatorInfo);
+      locatorInfo = assertionResult.locatorInfo;
+      operationAssertion = assertionResult.assertion;
+      break;
+    }
+
+    case 'assert_element_match': {
+      locatorInfo = await resolveStepLocator(page, step, {
+        ...options,
+        allowHidden: String(step.match_mode || '').trim().toLowerCase() === 'visible',
+      });
+      await showStepAction(page, step, locatorInfo.locator, options);
+      operationAssertion = await runAssertElementMatch(locatorInfo.locator, step, options);
       break;
     }
 
@@ -425,8 +452,21 @@ export async function runStep(page, testCase, step, options = {}) {
     matched_count: locatorInfo?.matchedCount ?? null,
     visible_count: locatorInfo?.visibleCount ?? null,
     ...(locatorInfo?.diagnostics ? { details: { locator_diagnostics: locatorInfo.diagnostics } } : {}),
+    ...(operationAssertion ? { operation_assertion: operationAssertion } : {}),
     ...extra,
   };
+}
+
+export async function waitWithCountdown(durationMs, onCountdown, sleeper = sleep) {
+  const totalMs = Math.max(0, Number(durationMs) || 0);
+  let remainingMs = totalMs;
+  while (remainingMs > 0) {
+    onCountdown?.(Math.ceil(remainingMs / 1000));
+    const intervalMs = Math.min(1000, remainingMs);
+    await sleeper(intervalMs);
+    remainingMs -= intervalMs;
+  }
+  return totalMs;
 }
 
 const FALLBACK_BROWSER_CONTEXTS = new WeakMap();
@@ -1368,11 +1408,11 @@ async function runAssertText(page, step, options, locatorInfo) {
   if (locatorInfo) {
     const actual = await locatorInfo.locator.textContent({ timeout: options.timeoutMs });
     assertContains(actual, expected, step);
-    return locatorInfo;
+    return { locatorInfo, assertion: createAssertion('元素文本', 'contains', expected, actual) };
   }
   const bodyText = await getActionRoot(page, options).locator('body').textContent({ timeout: options.timeoutMs });
   assertContains(bodyText, expected, step);
-  return null;
+  return { locatorInfo: null, assertion: createAssertion('页面文本', 'contains', expected, bodyText) };
 }
 
 async function runAssertTextNot(page, step, options, locatorInfo) {
@@ -1380,8 +1420,61 @@ async function runAssertTextNot(page, step, options, locatorInfo) {
   const actual = locatorInfo
     ? await locatorInfo.locator.textContent({ timeout: options.timeoutMs })
     : await getActionRoot(page, options).locator('body').textContent({ timeout: options.timeoutMs });
-  assertValueNotEquals(actual, expected, step, 'text');
-  return locatorInfo;
+  assertNotContains(actual, expected, step, 'text');
+  return { locatorInfo, assertion: createAssertion('元素文本', 'not_contains', expected, actual) };
+}
+
+async function runAssertElementMatch(locator, step, options) {
+  const matchMode = String(step.match_mode || '').trim().toLowerCase();
+  if (!['contains', 'equals', 'not_contains', 'regex', 'visible'].includes(matchMode)) {
+    throw new RunnerError('METHOD_CONFIG_INVALID', `不支持的元素断言匹配方式：${matchMode || '(空)'}`);
+  }
+  if (matchMode === 'visible') {
+    try {
+      await locator.waitFor({ state: 'visible', timeout: options.timeoutMs });
+    } catch {
+      throw new RunnerError('ASSERTION_FAILED', '目标元素在超时内不可见', {
+        step_id: step.id,
+        step_index: step.step_index,
+        match_mode: matchMode,
+      });
+    }
+    return createAssertion('页面元素', 'visible', 'visible', 'visible');
+  }
+
+  const expected = expectedFromStep(step);
+  const actual = await readElementAssertionValue(locator, step.read_mode, options.timeoutMs);
+  switch (matchMode) {
+    case 'contains':
+      assertContains(actual, expected, step);
+      break;
+    case 'equals':
+      assertValueEquals(actual, expected, step, 'element value', true);
+      break;
+    case 'not_contains':
+      assertNotContains(actual, expected, step, 'element value');
+      break;
+    case 'regex':
+      assertRegexMatch(actual, expected, step);
+      break;
+    default:
+      break;
+  }
+  return createAssertion('页面元素', matchMode, expected, actual, matchMode === 'regex' ? 'regex' : 'text');
+}
+
+async function readElementAssertionValue(locator, rawReadMode, timeoutMs) {
+  const readMode = String(rawReadMode || 'auto').trim().toLowerCase();
+  if (!['auto', 'text', 'value'].includes(readMode)) {
+    throw new RunnerError('METHOD_CONFIG_INVALID', `不支持的元素断言读取方式：${readMode || '(空)'}`);
+  }
+  await locator.waitFor({ state: 'attached', timeout: timeoutMs });
+  return locator.evaluate((node, mode) => {
+    const tagName = String(node.tagName || '').toLowerCase();
+    const effectiveMode = mode === 'auto' && ['input', 'textarea', 'select'].includes(tagName) ? 'value' : mode;
+    if (effectiveMode === 'value') return 'value' in node ? node.value : '';
+    return typeof node.innerText === 'string' ? node.innerText : (node.textContent || '');
+  }, readMode);
 }
 
 async function assertAttribute(locator, step, options) {
@@ -1389,6 +1482,7 @@ async function assertAttribute(locator, step, options) {
   if (!attribute) throw new RunnerError('METHOD_CONFIG_INVALID', 'assert_attribute requires attribute');
   const actual = await locator.getAttribute(attribute, { timeout: options.timeoutMs });
   assertValueEquals(actual, expectedFromStep(step), step, `attribute ${attribute}`);
+  return createAssertion(`元素属性 ${attribute}`, 'equals', expectedFromStep(step), actual);
 }
 
 async function runAssertTextRegex(page, step, options, locatorInfo) {
@@ -1410,7 +1504,23 @@ async function runAssertTextRegex(page, step, options, locatorInfo) {
       actual_preview: String(actual ?? '').slice(0, 500),
     });
   }
-  return locatorInfo;
+  return { locatorInfo, assertion: createAssertion('元素文本', 'regex_match', rawRegex, actual, 'regex') };
+}
+
+function createAssertion(subject, operator, expected, actual, expectedFormat = 'text') {
+  return {
+    subject,
+    operator,
+    expected: { value_state: 'visible', preview: String(expected ?? ''), format: expectedFormat },
+    actual: { value_state: 'visible', preview: previewAssertionValue(actual), format: valueType(actual) },
+    passed: true,
+  };
+}
+
+function previewAssertionValue(value) {
+  if (value == null) return '';
+  if (typeof value === 'object') return JSON.stringify(value).slice(0, 512);
+  return String(value).replace(/[\r\n]+/g, ' ').slice(0, 512);
 }
 
 function hasLocator(step) {
@@ -1421,8 +1531,10 @@ function expectedFromStep(step) {
   return String(firstPresent(step.expect, step.expected, step.value) ?? '');
 }
 
-function assertValueEquals(actual, expected, step, subject) {
-  if (String(actual ?? '') !== String(expected ?? '')) {
+function assertValueEquals(actual, expected, step, subject, normalizeText = false) {
+  const actualText = normalizeText ? normalizeAssertionText(actual) : String(actual ?? '');
+  const expectedText = normalizeText ? normalizeAssertionText(expected) : String(expected ?? '');
+  if (actualText !== expectedText) {
     throw new RunnerError('ASSERTION_FAILED', `Expected ${subject} did not match`, {
       step_id: step.id,
       step_index: step.step_index,
@@ -1432,9 +1544,9 @@ function assertValueEquals(actual, expected, step, subject) {
   }
 }
 
-function assertValueNotEquals(actual, expected, step, subject) {
-  if (String(actual ?? '') === String(expected ?? '')) {
-    throw new RunnerError('ASSERTION_FAILED', `Expected ${subject} to be different`, {
+function assertNotContains(actual, expected, step, subject) {
+  if (normalizeAssertionText(actual).includes(normalizeAssertionText(expected))) {
+    throw new RunnerError('ASSERTION_FAILED', `Expected ${subject} not to contain value`, {
       step_id: step.id,
       step_index: step.step_index,
       unexpected: String(expected ?? '').slice(0, 500),
@@ -1443,8 +1555,25 @@ function assertValueNotEquals(actual, expected, step, subject) {
   }
 }
 
+function assertRegexMatch(actual, expected, step) {
+  let regex;
+  try {
+    regex = new RegExp(String(expected ?? ''));
+  } catch (error) {
+    throw new RunnerError('METHOD_CONFIG_INVALID', `元素断言正则不合法：${error?.message || expected}`);
+  }
+  if (!regex.test(String(actual ?? ''))) {
+    throw new RunnerError('ASSERTION_FAILED', '元素值未匹配期望正则', {
+      step_id: step.id,
+      step_index: step.step_index,
+      regex: String(expected ?? '').slice(0, 500),
+      actual_preview: String(actual ?? '').slice(0, 500),
+    });
+  }
+}
+
 function assertContains(actual, expected, step) {
-  if (!String(actual ?? '').includes(String(expected ?? ''))) {
+  if (!normalizeAssertionText(actual).includes(normalizeAssertionText(expected))) {
     throw new RunnerError('ASSERTION_FAILED', `Expected text was not found: ${String(expected ?? '').slice(0, 200)}`, {
       step_id: step.id,
       step_index: step.step_index,
@@ -1452,6 +1581,15 @@ function assertContains(actual, expected, step) {
       actual_preview: String(actual ?? '').slice(0, 500),
     });
   }
+}
+
+function normalizeAssertionText(value) {
+  return String(value ?? '')
+    .normalize('NFKC')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/\u00A0/g, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
 }
 
 async function uploadFiles(page, locator, rawValue, options) {

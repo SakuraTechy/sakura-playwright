@@ -30,6 +30,48 @@
 | M4 | CI 和批量执行 | 通过 | 批量入口、mock 批量 job API、CI 模板已实现并通过本地 mock 验收 |
 | M5 | 高级能力 | 部分通过 | M5-A 至 M5-O 已完成 iframe、文件上传、多文件上传、隐藏上传代理、下载断言、高级下载校验、二进制下载校验、JSON/API、Monaco 输入、Monaco 快捷键、树定位、展开/复选树、多窗口基础切换、多窗口显式切换和关闭、多 popup 选择、网络 mock、类 HAR 回放、请求断言、响应断言、响应快照、快照基线对比、请求数量断言、失败注入专项 case、Playwright/pytest 脚本导出、复杂定位导出、高级动作导出和导出 Playwright 端到端执行并通过 mock 验收 |
 
+## 2026-08-07：同一浏览器窗口连续执行
+
+### 完成情况
+
+| 事项 | 结果 |
+| --- | --- |
+| 新会话模式 | 新增 `reuse-browser`，同一批次的独立 Runner 进程连接同一个 Browser、Context 和当前页面 |
+| 页面连续性 | 同源非登录业务页直接交给下一条用例，保留 sessionStorage、IndexedDB、页面内存和运行时 DOM 状态 |
+| 生命周期 | 仅允许串行；失败、取消、批次终态或 admin 停止时关闭共享宿主，不影响默认 `isolated` 和 `reuse-auth` |
+| 产物边界 | Trace、失败截图和结果仍按用例生成；`video=on|off|retain-on-failure` 均可用，每条 Runner 在共享 Page 上独立启停 screencast 并生成分段 WebM，不关闭共享 Context |
+| 安全边界 | WebSocket 端点只绑定 `127.0.0.1`，由服务端通过子进程环境变量传递，不写入日志、场景或接口响应 |
+
+### 验证
+
+- `npm run check`：通过。
+- `npm run test:unit`：通过，72/72；覆盖 `reuse-browser` 保留所选录屏策略。
+- `npm run test:session`：通过，3/3；新增用例验证两个独立 Runner 进程共享同一页面及仅存在于页面内存的 DOM 状态、每条成功用例生成非空 WebM，并验证失败后新宿主接管后续用例。
+- Admin UI `npm run typecheck`：通过。
+- Admin `mvn -pl continew-automation -am -DskipTests compile`：通过；`AutomationPlaywrightRunnerJobServiceImplTest` 通过，6/6。依赖仓库连接与证书告警不影响本次编译和测试结果。
+
+## 2026-08-05：变量执行诊断与等待倒计时
+
+### 完成情况
+
+| 事项 | 结果 |
+| --- | --- |
+| 全局变量详情 | 本地变量动作把变量名、来源及脱敏后的值预览写入 `step.details.variable`；不写原始对象或敏感值 |
+| 引用变量详情 | 包含 `${...}` 的步骤把引用名和本次解析值写入 `step.details.variable_references`；根变量标记为敏感时仅保存 `value_masked=1` |
+| 基础设施变量 | Agent 原始变量仍只在当前 Runner 内存中使用，写报告前通过 `VariableContext.describe()` 转为同一安全预览 |
+| 等待日志 | `wait` 动作按剩余秒数输出结构化倒计时日志，并保持原配置总等待时长 |
+
+### 验证
+
+- `npm run check`：通过。
+- `npm run test:unit`：通过，58/58；新增覆盖全局变量详情、引用实际值与敏感值隐藏、2500ms 等待产生 `<3s>/<2s>/<1s>` 日志且累计时长不变。
+- Admin UI `pnpm typecheck` 和诊断组件 ESLint：通过；历史本地变量记录可从顶层 `variable_name/value_preview` 生成只读兼容详情。
+
+### 边界
+
+- 历史记录未持久化的引用实际值和等待倒计时不能事后还原；这些字段从新执行开始产生。
+- 值预览最长 120 个字符；`value_masked=1` 时只展示 `******`，不在报告或日志中写入实际值。
+
 ## 2026-07-24：批次认证状态复用与取消联动
 
 ### 完成情况
@@ -615,7 +657,7 @@ M5-A 至 M5-O 十五批高级能力已完成并通过本地 mock 验收；完整
 | --- | --- | --- |
 | admin Runner Job 创建/查询/取消 API | 已实现 | admin 异步启动 `src/index.js`，受权限保护并限制并发数 |
 | admin-ui Runner 回放入口 | 已实现 | 场景编辑页选择用例后点击“Playwright Runner 回放”，轮询任务并刷新执行历史 |
-| admin 认证结果回传 | 已实现 | 后台将当前登录用户 Bearer Token 注入 Runner，Runner 读取和回传均走 admin API |
+| admin 认证结果回传 | 已实现 | 后台将当前登录用户 Bearer Token 和批次短期 execution capability 注入 Runner；带批次的读取和回传使用 capability 限定当前执行范围 |
 | 用例/步骤结果展示 | 已实现 | Runner `raw.steps`、扩展 `case_result.steps` 均写入 admin 执行记录 |
 | 结构化实时日志 | 已实现 | Runner stdout 发送带时间、级别、阶段和详略标记的事件，admin-ui 支持简洁/详细切换和自动跟随 |
 | Runner 实时画面 | 已实现 | Runner 每秒上传最新 JPEG，admin-ui 轮询 Job 内存中的最新帧；终态短暂保留最后一帧且不进入 `caseList/debugRecord` |
@@ -651,6 +693,14 @@ M5-A 至 M5-O 十五批高级能力已完成并通过本地 mock 验收；完整
 - admin-ui 使用 Bearer Header 定时读取最新 JPEG，不把登录令牌放入 URL；关闭抽屉或切换用例会停止轮询并释放 Blob URL。
 - Jenkins 和 Extension CDP 的日志、报告与录屏入口保持原行为。
 
+### UI 自动化全操作执行详情统一展示 Phase A（2026-08-06）
+
+- 操作目录已增加统一诊断 profile 映射，覆盖 13 类、62 个操作方法；Admin 加载目录时校验覆盖完整性、重复项和非法 profile。
+- Playwright Runner 新增 `details.operation` 通用执行摘要，保留既有 `details.infrastructure`、`details.variable`、`details.variable_references` 和定位诊断，不替换原有类型化结果。
+- 执行摘要按白名单输出方法身份、配置值、运行时生效值、目标摘要和结果事实；敏感值脱敏，SQL、命令、脚本和路径不输出原文或完整路径。
+- Admin 执行详情页已接入统一摘要，并兼容没有新摘要的历史执行记录；数据库/服务器原有结果面板继续独立展示。
+- 验证通过：Runner `npm run check`、`npm run test:unit`（62/62），Admin `mvn -pl continew-automation -am -DskipTests compile`，admin-ui `pnpm typecheck`、定向 ESLint 和 `pnpm build:prod`。
+
 ### M6 实时画面质量档位补充（2026-07-19）
 
 - `Playwright Runner 配置` 在浏览器右侧新增实时画面质量下拉框，提供流畅、高清、超清和 8K 四档，平台默认选择高清。
@@ -658,3 +708,15 @@ M5-A 至 M5-O 十五批高级能力已完成并通过本地 mock 验收；完整
 - Runner 按档位设置设备像素倍率、JPEG 质量和截图间隔；有头最大化模式保持实际浏览器窗口分辨率，避免违反 Playwright 的 `viewport=null` 限制。
 - admin-ui 实时画面轮询调整为 1 秒，关闭查看器后仍会停止轮询并释放 Blob URL；Jenkins 与 Extension CDP 链路不变。
 - 验证通过：Runner `npm run check`、`npm run test:unit`，admin `mvn -pl continew-automation -am -DskipTests compile`，admin-ui `pnpm typecheck`、定向 ESLint 和 `pnpm build:prod`。
+
+### M6 CueCast 录制变量与元素断言适配（2026-08-07）
+
+- Runner 在 `case-loader` 边界把 CueCast 原始 `set_variable` 和带断言元数据的 `assert_text` 转换为运行时副本；Admin 中的 `playwright_step`、`locator_meta` 和 `{{name}}` 原文不回写、不迁移。
+- `global_variable_set` 支持 locator 运行时取值、正则分组 0 和明确的抽取错误；变量上下文同时支持规范 `${name}` 与 CueCast `{{name}}` 语法。
+- 新增统一动作 `assert_element_match`，覆盖 `contains`、`equals`、`not_contains`、`regex`、`visible`，并按 `auto/text/value` 读取页面元素。
+- 操作目录同步升级为 `2026-08-07.1`、63 个方法，Runner 能力注册和统一诊断详情已覆盖新增方法。
+- Playwright 与 Pytest 导出器生成等价的运行时变量和五种元素断言代码；导出测试会执行生成后的两个脚本，而不只做文本或语法检查。
+- 新增 case 298 集成测试，直接读取 CueCast `test-lab/mock-data/cases.json`，通过内存 API 和真实 Chromium 执行 8 个原始录制步骤，不改写 mock 数据。
+- 跨执行器验收通过：Admin 定向测试 41/41，CueCast 契约 24/24，Selenium 目录/诊断/语义及真实 Chrome 测试 9/9，Execution Agent 目录夹具 1/1。
+
+验证结果：`npm run check` 通过，`npm run test:unit` 79/79 通过，`npm run test:locator` 13/13 通过，`npm run test:export` 1/1 通过。

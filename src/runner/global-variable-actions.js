@@ -19,7 +19,7 @@ export function isLocalVariableAction(actionType) {
 }
 
 /**
- * 全局变量动作的值仅保存到当前 Runner 的 VariableContext；此处不写磁盘、日志或 Admin 结果。
+ * 全局变量动作的原始值仅保存到当前 Runner 的 VariableContext；Admin 结果只允许写脱敏、截断后的预览。
  * 不依赖浏览器的日期/公式/变量断言在纯基础设施用例中也可运行。
  */
 export async function runLocalVariableAction(page, step, options = {}) {
@@ -63,7 +63,7 @@ async function setVariable(page, step, options, context) {
       if (String(readMode || '').startsWith('attribute:')) {
         return node.getAttribute(String(readMode).slice('attribute:'.length));
       }
-      return node.textContent || '';
+      return typeof node.innerText === 'string' ? node.innerText : (node.textContent || '');
     }, step.read_mode || 'text');
   } else if (sourceType === 'script') {
     if (!page) throw new RunnerError('CASE_INVALID', '从页面脚本读取变量需要浏览器页面');
@@ -133,9 +133,19 @@ function assertVariableContains(step, context, negate) {
       ? `变量 ${reference} 不应包含 ${expected}`
       : `变量 ${reference} 未包含 ${expected}`);
   }
+  const description = context.describe(reference);
   return {
     action_type: String(step.action_type),
-    variable: context.describe(reference),
+    variable: description,
+    operation_assertion: {
+      subject: `变量 ${reference}`,
+      operator: negate ? 'not_contains' : 'contains',
+      expected: { value_state: 'visible', preview: String(expected ?? '') },
+      actual: description.value_masked
+        ? { value_state: 'masked' }
+        : { value_state: 'visible', preview: String(actualText).slice(0, 512) },
+      passed: true,
+    },
   };
 }
 
@@ -159,8 +169,14 @@ function applyTextTransforms(value, step) {
       throw new RunnerError('METHOD_CONFIG_INVALID', '变量提取正则不合法');
     }
     if (!match) throw new RunnerError('VARIABLE_VALUE_NOT_FOUND', '变量提取正则未匹配到内容');
-    const group = String(step.regex_group || '1');
-    transformed = match.groups?.[group] ?? match[Number(group)] ?? match[0];
+    const group = String(step.regex_group ?? '0');
+    const groupValue = match.groups && Object.prototype.hasOwnProperty.call(match.groups, group)
+      ? match.groups[group]
+      : match[Number(group)];
+    if (groupValue == null) {
+      throw new RunnerError('VARIABLE_VALUE_NOT_FOUND', `变量提取正则不存在捕获组：${group}`);
+    }
+    transformed = groupValue;
   }
   const replaceFrom = step.replace_from;
   if (replaceFrom != null && String(replaceFrom) !== '') {

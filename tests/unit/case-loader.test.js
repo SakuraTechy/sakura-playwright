@@ -50,3 +50,78 @@ test('infrastructure-only cases do not require a browser start_url and retain ex
   assert.equal(testCase.steps[0].parameters[0].value_ref, 'secret.password');
   assert.deepEqual(testCase.steps[0].target_ref, { kind: 'database', binding_key: 'audit-db' });
 });
+
+test('CueCast 保存变量步骤只在运行时转换并保留原始定位元数据', () => {
+  const locatorMeta = {
+    candidates: [{ type: 'css_unique', value: '.order-number', score: 100 }],
+    context: {
+      variable: {
+        name: 'order_number',
+        source: 'text',
+        extract: { mode: 'regex', pattern: 'ORD-(\\d+)', group: 0 },
+      },
+    },
+  };
+  const [step] = normalizeSteps([{
+    id: 'RECORDED_VAR',
+    action_type: 'set_variable',
+    target_selector: '.order-number',
+    value: 'order_number',
+    value_text: 'ORD-20260807',
+    locator_meta: locatorMeta,
+  }]);
+
+  assert.equal(step.action_type, 'global_variable_set');
+  assert.equal(step.original_action_type, 'set_variable');
+  assert.equal(step.recording_source, 'cuecast-v1.2');
+  assert.equal(step.variable_name, 'order_number');
+  assert.equal(step.source_type, 'locator');
+  assert.equal(step.read_mode, 'text');
+  assert.equal(step.regex, 'ORD-(\\d+)');
+  assert.equal(step.regex_group, 0);
+  assert.equal(step.value_text, 'ORD-20260807');
+  assert.strictEqual(step.locator_meta, locatorMeta);
+});
+
+test('CueCast 元素断言转换为统一匹配动作，普通文本断言保持不变', () => {
+  const [recorded, legacy] = normalizeSteps([{
+    id: 'RECORDED_ASSERT',
+    action_type: 'assert_text',
+    target_selector: '#title',
+    value: '系统管理平台',
+    locator_meta: {
+      assertion: { target: 'element', match: 'not_contains' },
+      context: { assertion: { target: 'element', match: 'not_contains', source: 'text' } },
+    },
+  }, {
+    id: 'LEGACY_ASSERT',
+    action_type: 'assert_text',
+    value: '页面文本',
+  }]);
+
+  assert.equal(recorded.action_type, 'assert_element_match');
+  assert.equal(recorded.original_action_type, 'assert_text');
+  assert.equal(recorded.match_mode, 'not_contains');
+  assert.equal(recorded.read_mode, 'text');
+  assert.equal(recorded.expect, '系统管理平台');
+  assert.equal(legacy.action_type, 'assert_text');
+  assert.equal(legacy.original_action_type, undefined);
+});
+
+test('CueCast 录制步骤结构不完整时返回带步骤身份的明确错误', () => {
+  assert.throws(() => normalizeSteps([{
+    id: 'RECORDED_VAR_INVALID',
+    step_index: 4,
+    action_type: 'set_variable',
+    target_selector: '#title',
+    value: '',
+    locator_meta: { context: { variable: { source: 'text', extract: { mode: 'full' } } } },
+  }]), {
+    code: 'RECORDED_VARIABLE_NAME_MISSING',
+    details: {
+      step_id: 'RECORDED_VAR_INVALID',
+      step_index: 4,
+      action_type: 'set_variable',
+    },
+  });
+});

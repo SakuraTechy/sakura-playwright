@@ -85,6 +85,7 @@ export async function runInfrastructureStep(testCase, step, options = {}) {
     projectEnvironmentId: execution.projectEnvironmentId || '',
     definitionVersion: execution.definitionVersion || testCase.definition_version || testCase.definitionVersion || '',
   };
+  if (execution.executionCapability) payload.executionCapability = execution.executionCapability;
   const runtimeBindings = options.runtimeBindings || {};
   // 仅携带冻结步骤中实际引用的变量根节点；空绑定不改变既有任务接口契约。
   if (Object.keys(runtimeBindings).length > 0) payload.runtimeBindings = runtimeBindings;
@@ -146,11 +147,14 @@ function isTerminalStatus(status) {
 
 function buildTaskResult(step, taskId, task, status) {
   const details = safeTaskDetails(task);
+  const infrastructure = validatedInfrastructureResult(task);
   if (status === 'failed' || status === 'cancelled') {
     throw new RunnerError(
       status === 'cancelled' ? 'INFRASTRUCTURE_STEP_CANCELLED' : 'INFRASTRUCTURE_STEP_FAILED',
       taskFailureMessage(task, status),
-      { infrastructure_task_id: taskId, ...details },
+      { infrastructure_task_id: taskId, ...details, ...(infrastructure
+        ? { infrastructure }
+        : {}) },
     );
   }
   return {
@@ -162,12 +166,29 @@ function buildTaskResult(step, taskId, task, status) {
     duration_ms: numberOrNull(task.duration_ms ?? task.durationMs),
     executor: task.executor || 'infrastructure-agent',
     infrastructure_task_id: taskId,
+    // 受限预览进入统一 step.details，完整输出和大结果只能通过 Admin 受鉴权附件读取。
+    ...(infrastructure
+      ? { details: { infrastructure } }
+      : {}),
     // 仅在当前内存循环中交给 VariableContext；调用方会在写入报告前删除该字段。
     ...(task?.result?.variables && typeof task.result.variables === 'object'
       ? { _runtime_variables: task.result.variables }
       : {}),
     ...details,
   };
+}
+
+function validatedInfrastructureResult(task) {
+  const result = task?.result?.infrastructure;
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return null;
+  const schemaVersion = Number(result.schemaVersion ?? 1);
+  if (![1, 2].includes(schemaVersion)) {
+    throw new RunnerError('RESULT_SCHEMA_UNSUPPORTED', `Unsupported infrastructure result schema: ${schemaVersion}`);
+  }
+  if (schemaVersion === 2 && !Array.isArray(result.results)) {
+    throw new RunnerError('RESULT_SCHEMA_UNSUPPORTED', 'Infrastructure result schema v2 requires an ordered results array');
+  }
+  return result;
 }
 
 // 失败步骤必须带出 Admin/Agent 返回的具体原因，不能退化成“执行 Agent 不可用”。

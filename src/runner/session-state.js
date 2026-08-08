@@ -171,6 +171,34 @@ export function resolveSessionStartUrl(recordedStartUrl, lastUrl, options = {}) 
   }
 }
 
+export function resolveSharedBrowserStart(recordedStartUrl, currentUrl) {
+  const fallback = {
+    url: recordedStartUrl,
+    navigate: true,
+    resumed: false,
+    reason: 'shared-browser-initial-navigation',
+  };
+  if (!currentUrl || currentUrl === 'about:blank') return fallback;
+  try {
+    const recorded = new URL(recordedStartUrl);
+    const current = new URL(currentUrl);
+    if (recorded.origin !== current.origin) {
+      return { ...fallback, reason: 'shared-browser-different-origin' };
+    }
+    if (isAuthenticationUrl(current)) {
+      return { ...fallback, reason: 'shared-browser-authentication-reload' };
+    }
+    return {
+      url: current.href,
+      navigate: false,
+      resumed: true,
+      reason: 'reuse-current-page',
+    };
+  } catch {
+    return { ...fallback, reason: 'shared-browser-invalid-current-url' };
+  }
+}
+
 export function isLikelyAuthenticationUrl(value) {
   try {
     return isAuthenticationUrl(new URL(value));

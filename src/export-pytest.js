@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { ApiClient } from './api/api-client.js';
 import { normalizeCase } from './runner/case-loader.js';
 import { formatPlatformDateTime, loadRunnerEnv, parseCliArgs, timestampForPath, trimTrailingSlash } from './shared/utils.js';
@@ -30,7 +31,7 @@ function parseExportArgs(argv = process.argv.slice(2), env = process.env) {
   };
 }
 
-async function renderPytest(testCase, config) {
+export async function renderPytest(testCase, config) {
   const preparedSteps = await Promise.all(testCase.steps.map(prepareStepForExport));
   const bodyLines = [
     `api_base = os.environ.get("CUECAST_API_BASE") or ${quotePy(config.apiBase)}`,
@@ -40,6 +41,7 @@ async function renderPytest(testCase, config) {
     'page = context.new_page()',
     'try:',
     '    cuecast_pages = [page]',
+    '    cuecast_variables = {}',
     '    network_events = []',
     '',
     '    def attach_network_recorder(target_page):',
@@ -104,7 +106,7 @@ function renderStep(prepared) {
   }
   switch (action) {
     case 'navigate':
-      return [`    page.goto(${quotePy(String(value || step.url || ''))})`];
+      return [`    page.goto(${renderRuntimePyString(value || step.url || '')})`];
     case 'click':
       return [`    ${locator}.click()`];
     case 'double_click':
@@ -112,15 +114,19 @@ function renderStep(prepared) {
     case 'right_click':
       return [`    ${locator}.click(button="right")`];
     case 'input':
-      return [`    ${locator}.fill(${quotePy(String(value ?? ''))})`];
+      return [`    ${locator}.fill(${renderRuntimePyString(value)})`];
     case 'key':
-      return locator ? [`    ${locator}.press(${quotePy(String(value || 'Enter'))})`] : [`    page.keyboard.press(${quotePy(String(value || 'Enter'))})`];
+      return locator ? [`    ${locator}.press(${renderRuntimePyString(value || 'Enter')})`] : [`    page.keyboard.press(${renderRuntimePyString(value || 'Enter')})`];
     case 'hover':
       return [`    ${locator}.hover()`];
     case 'assert_text':
       return locator
-        ? [`    expect(${locator}).to_contain_text(${quotePy(String(value ?? ''))})`]
-        : [`    expect(page.locator("body")).to_contain_text(${quotePy(String(value ?? ''))})`];
+        ? [`    expect(${locator}).to_contain_text(${renderRuntimePyString(value)})`]
+        : [`    expect(page.locator("body")).to_contain_text(${renderRuntimePyString(value)})`];
+    case 'global_variable_set':
+      return renderGlobalVariableSet(step, locator, suffix);
+    case 'assert_element_match':
+      return renderElementMatch(step, locator, suffix);
     case 'file_upload':
       return renderFileUpload(locator, value);
     case 'assert_download':
@@ -163,6 +169,51 @@ function renderStep(prepared) {
     default:
       return [`    # TODO: action ${quotePy(action)} requires custom export handling.`];
   }
+}
+
+function renderGlobalVariableSet(step, locator, suffix) {
+  const sourceType = String(step.source_type || step.source || 'literal').trim().toLowerCase();
+  const variableName = String(step.variable_name || '').trim();
+  const rawName = `cuecast_variable_raw_${suffix}`;
+  let source;
+  if (['locator', 'element', '页面元素', '元素'].includes(sourceType)) {
+    source = `cuecast_read_element_value(${locator}, ${quotePy(step.read_mode || 'text')})`;
+  } else if (['literal', 'value', 'text', 'constant', '常量', '固定值'].includes(sourceType)) {
+    source = `cuecast_resolve_variables(${pyValue(step.value ?? '')}, cuecast_variables)`;
+  } else if (['script', 'javascript', 'js', '脚本'].includes(sourceType)) {
+    source = `page.evaluate("script => Function('\\\"use strict\\\"; return (function () {\\\\n' + script + '\\\\n})();')()", ${renderRuntimePyString(step.script || step.value || '')})`;
+  } else {
+    throw new Error(`Unsupported exported variable source_type: ${sourceType || '(empty)'}`);
+  }
+  const transform = {
+    regex: step.regex || '',
+    regex_group: step.regex_group ?? 0,
+    replace_from: step.replace_from ?? '',
+    replace_to: step.replace_to ?? '',
+  };
+  return [
+    `    ${rawName} = ${source}`,
+    `    cuecast_variables[${quotePy(variableName)}] = cuecast_extract_variable(${rawName}, ${pyValue(transform)})`,
+  ];
+}
+
+function renderElementMatch(step, locator, suffix) {
+  const matchMode = String(step.match_mode || '').trim().toLowerCase();
+  if (matchMode === 'visible') return [`    expect(${locator}).to_be_visible()`];
+  if (!['contains', 'equals', 'not_contains', 'regex'].includes(matchMode)) {
+    throw new Error(`Unsupported exported element match_mode: ${matchMode || '(empty)'}`);
+  }
+  const actualName = `cuecast_assertion_actual_${suffix}`;
+  const expectedName = `cuecast_assertion_expected_${suffix}`;
+  const lines = [
+    `    ${actualName} = str(cuecast_read_element_value(${locator}, ${quotePy(step.read_mode || 'auto')}))`,
+    `    ${expectedName} = ${renderRuntimePyString(step.expect ?? step.value ?? '')}`,
+  ];
+  if (matchMode === 'contains') lines.push(`    assert ${expectedName} in ${actualName}`);
+  if (matchMode === 'equals') lines.push(`    assert ${actualName} == ${expectedName}`);
+  if (matchMode === 'not_contains') lines.push(`    assert ${expectedName} not in ${actualName}`);
+  if (matchMode === 'regex') lines.push(`    assert re.search(${expectedName}, ${actualName}) is not None`);
+  return lines;
 }
 
 function renderAssertJson(step, locator, suffix) {
@@ -282,7 +333,7 @@ function parseFileUploadConfig(rawValue) {
 }
 
 function needsLocator(action) {
-  return ['click', 'double_click', 'right_click', 'input', 'hover', 'assert_text', 'file_upload', 'assert_download', 'click_open_page'].includes(action);
+  return ['click', 'double_click', 'right_click', 'input', 'hover', 'assert_text', 'global_variable_set', 'assert_element_match', 'file_upload', 'assert_download', 'click_open_page'].includes(action);
 }
 
 function parseMeta(raw) {
@@ -326,6 +377,10 @@ function pyValue(value) {
   return quotePy(String(value));
 }
 
+function renderRuntimePyString(value) {
+  return `str(cuecast_resolve_variables(${quotePy(value)}, cuecast_variables))`;
+}
+
 function escapeComment(value) {
   return String(value ?? '').replace(/\r?\n/g, ' ').slice(0, 300);
 }
@@ -335,6 +390,66 @@ function escapeDoc(value) {
 }
 
 const PYTEST_HELPERS = [
+  'def cuecast_read_element_value(locator, raw_read_mode):',
+  '    read_mode = str(raw_read_mode or "auto").lower()',
+  '    locator.wait_for(state="attached")',
+  '    return locator.evaluate("""(node, mode) => {',
+  '        const tagName = String(node.tagName || "").toLowerCase();',
+  '        const effectiveMode = mode === "auto" && ["input", "textarea", "select"].includes(tagName) ? "value" : mode;',
+  '        if (effectiveMode === "value") return "value" in node ? node.value : "";',
+  '        return typeof node.innerText === "string" ? node.innerText : (node.textContent || "");',
+  '    }""", read_mode)',
+  '',
+  '',
+  'def cuecast_extract_variable(raw_value, config):',
+  '    value = str(raw_value or "")',
+  '    if config.get("regex"):',
+  '        match = re.search(str(config["regex"]), value)',
+  '        if not match:',
+  '            raise AssertionError("CueCast variable regex did not match")',
+  '        raw_group = config.get("regex_group", 0)',
+  '        group = int(raw_group) if str(raw_group).isdigit() else str(raw_group)',
+  '        try:',
+  '            value = match.group(group)',
+  '        except (IndexError, KeyError) as error:',
+  '            raise AssertionError(f"CueCast variable regex group was not found: {raw_group}") from error',
+  '    replace_from = config.get("replace_from")',
+  '    if replace_from is not None and str(replace_from) != "":',
+  '        value = value.replace(str(replace_from), str(config.get("replace_to") or ""))',
+  '    return value',
+  '',
+  '',
+  'def cuecast_resolve_variables(value, variables):',
+  '    if isinstance(value, list):',
+  '        return [cuecast_resolve_variables(item, variables) for item in value]',
+  '    if isinstance(value, dict):',
+  '        return {key: cuecast_resolve_variables(item, variables) for key, item in value.items()}',
+  '    if not isinstance(value, str) or ("${" not in value and "{{" not in value):',
+  '        return value',
+  '    whole = re.fullmatch(r"\\$\\{([^{}]+)}", value) or re.fullmatch(r"\\{\\{([^{}]+)}}", value)',
+  '    if whole:',
+  '        return cuecast_variable_reference(variables, whole.group(1))',
+  '    return re.sub(r"\\$\\{([^{}]+)}|\\{\\{([^{}]+)}}", lambda match: str(cuecast_variable_reference(variables, match.group(1) or match.group(2))), value)',
+  '',
+  '',
+  'def cuecast_variable_reference(variables, raw_reference):',
+  '    reference = str(raw_reference or "").strip()',
+  '    if reference in variables:',
+  '        return variables[reference]',
+  '    roots = sorted((name for name in variables if reference.startswith(name + ".") or reference.startswith(name + "[")), key=len, reverse=True)',
+  '    if not roots:',
+  '        raise AssertionError(f"CueCast variable was not found: {reference}")',
+  '    root = roots[0]',
+  '    current = variables[root]',
+  '    remainder = reference[len(root):]',
+  '    tokens = re.findall(r"\\.[A-Za-z_][A-Za-z0-9_-]*|\\[\\d+]", remainder)',
+  '    if "".join(tokens) != remainder:',
+  '        raise AssertionError(f"CueCast variable reference is invalid: {reference}")',
+  '    for token in tokens:',
+  '        current = current[token[1:]] if token.startswith(".") else current[int(token[1:-1])]',
+  '    return current',
+  '',
+  '',
   'def cuecast_track_page(pages, target_page):',
   '    if target_page and target_page not in pages:',
   '        pages.append(target_page)',
@@ -705,7 +820,9 @@ const PYTEST_HELPERS = [
   '    return re.sub(r\'[<>:"/\\\\|?*\\x00-\\x1F]\', "_", str(value or "download.txt"))[:180]',
 ];
 
-main().catch((error) => {
-  console.error(`[export] ${error?.message || error}`);
-  process.exitCode = 1;
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(`[export] ${error?.message || error}`);
+    process.exitCode = 1;
+  });
+}

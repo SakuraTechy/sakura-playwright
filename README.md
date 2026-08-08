@@ -52,7 +52,55 @@ SAKURA_PLAYWRIGHT_NODE_COMMAND=node
 SAKURA_PLAYWRIGHT_RUNNER_MAX_CONCURRENT=2
 ```
 
-admin 仅负责定位并启动 Runner、限制并发、注入当前登录用户的短期 Bearer Token。服务地址、产物目录等节点参数配置在 `.env`；浏览器、无头模式、实时画面质量、HTTPS 证书策略、超时和 trace/video 策略由平台任务白名单参数覆盖。admin 服务节点需要满足 Node.js、Runner 依赖和 Playwright 浏览器已安装。
+Admin 仅负责定位并启动 Runner、限制并发、注入当前登录用户的短期 Bearer Token。服务地址、产物目录等节点参数配置在 Admin 的配置文件；浏览器、无头模式、实时画面质量、HTTPS 证书策略、超时和 trace/video 策略由平台任务白名单参数覆盖。Admin 服务节点需要满足 Node.js、Runner 依赖和 Playwright 浏览器已安装。
+
+#### 本机托管 Runner 的正常流程
+
+本机托管是指由 Admin 进程创建 `sakura-playwright/src/index.js` 子进程。部署或更新 Admin 后，首次使用前重启一次 Admin，使 Liquibase 创建或更新执行器注册表；不需要手动调用注册接口。
+
+执行流程如下：
+
+1. 在 Admin UI 选择场景、用例和产品环境。
+2. Admin 启动 Runner 前自动注册或恢复 `playwright` 执行器实例。
+3. Admin 自动注入 `SAKURA_PLAYWRIGHT_EXECUTOR_INSTANCE_ID`、`CUECAST_TOKEN` 和 `CUECAST_PROJECT_ENVIRONMENT_ID`。
+4. Runner 自动上报 Playwright 能力并执行用例。
+
+本机托管模式不需要修改本目录的 `.env`，也不需要配置 `SAKURA_ADMIN_ACCESS_KEY` 或 `SAKURA_ADMIN_SECRET_KEY`。执行器实例 ID默认使用 `playwright-<Admin主机名>`；如需固定名称，可在 Admin 配置中设置 `SAKURA_PLAYWRIGHT_EXECUTOR_INSTANCE_ID`。该配置属于 Admin，不属于 Runner `.env`。
+
+只有直接运行 `node src/index.js`、由 Jenkins 启动，或由其他机器独立启动 Runner 时，才属于外部独立 Runner流程。
+
+Runner 通过 Admin API 读取用例时，必须同时提供产品环境参数：使用 `--admin-api true`（或 `.env` 中的 `CUECAST_ADMIN_API=true`）时，设置 `--project-environment-id <id>` 或 `CUECAST_PROJECT_ENVIRONMENT_ID=<id>`。缺少该参数会在 Runner 启动前失败，避免误执行数据库中保存的原始绝对地址。
+
+### 外部独立 Runner 应用认证
+
+外部 Runner 不使用 Admin 托管任务注入的 Bearer Token 时，在 Admin“应用管理”创建应用，保存 Access Key 和 Secret Key。然后由管理员首次注册并绑定执行器实例；后续启动不需要重复注册：
+
+```json
+{
+  "executor_type": "playwright",
+  "executor_instance_id": "playwright-external-01",
+  "application_access_key": "应用管理中的 Access Key",
+  "project_environment_id": 47,
+  "description": "外部 Playwright Runner"
+}
+```
+
+请求接口为 `POST /automation/operation-catalog/executors`。Runner 配置 `SAKURA_ADMIN_ACCESS_KEY`、`SAKURA_ADMIN_SECRET_KEY` 和 `SAKURA_PLAYWRIGHT_EXECUTOR_INSTANCE_ID` 后，会使用现有开放 API 签名规则访问 Admin，并自动上报能力；不需要每次启动重复注册。撤销应用密钥或禁用执行器注册记录后，能力上报会被拒绝。
+
+外部 Runner 最小配置示例：
+
+```env
+CUECAST_API_BASE=http://<Admin地址>:8000
+CUECAST_ADMIN_API=true
+CUECAST_PROJECT_ENVIRONMENT_ID=47
+SAKURA_ADMIN_ACCESS_KEY=<应用管理中的Access Key>
+SAKURA_ADMIN_SECRET_KEY=<应用管理中的Secret Key>
+SAKURA_PLAYWRIGHT_EXECUTOR_INSTANCE_ID=playwright-external-01
+```
+
+外部 Runner 不需要配置 `CUECAST_TOKEN`；Access Key/Secret Key 会自动为每个 Admin API 请求生成签名。应用密钥只用于认证和能力上报，执行器注册和禁用仍由管理员完成。
+
+最近一次能力上报可通过管理员接口 `GET /automation/operation-catalog/executors/playwright/{executor_instance_id}` 查看，其中 `last_actions` 和 `last_features` 是 JSON 清单；Runner 日志也会输出 `action清单=`。
 
 浏览器下载受限的节点可以在 Runner `.env` 配置 `RUNNER_BROWSER_EXECUTABLE_PATH`，指向与 `RUNNER_BROWSER` 匹配的已安装浏览器绝对路径。例如 Windows 系统 Chrome 可配合 `RUNNER_BROWSER=chromium` 使用。未配置时仍使用 Playwright 管理的浏览器，不要把开发机路径写入 `.env.example`。
 
@@ -210,6 +258,8 @@ npm run run:batch -- --case-ids 278,279 --api-base http://127.0.0.1:4173/api --w
 - `--session-mode isolated` 为默认隔离模式；`--session-mode reuse-auth` 会把上一条成功用例的 Cookie、localStorage、IndexedDB 和最终页面同源 sessionStorage 快照提供给下一条用例。
 - `reuse-auth` 会记录上一条成功用例的最终同源业务页；下一条录制起点仍是 `/login`、`/login1`、`/signin` 等登录路由时，优先恢复该业务页，避免加载状态后又被固定起点覆盖回登录页面。
 - `reuse-auth` 必须带批次标识且强制 `--workers 1`；失败或取消用例不覆盖上一份成功状态，批次退出时删除临时状态目录。
+- `--session-mode reuse-browser` 由批次宿主持有同一个 Browser、Context 和当前页面，各用例 Runner 进程仅连接和断开；成功用例结束后，下一条用例从当前同源业务页继续执行，不重新打开登录页或浏览器窗口。
+- `reuse-browser` 强制 `--workers 1`。`--video on|off|retain-on-failure` 均可用：Runner 在共享页面上按用例启动和停止 screencast，分别生成 WebM，不关闭共享窗口；Trace、失败截图和结果也仍按用例生成。失败、取消或批次结束会销毁共享浏览器，避免把不确定页面状态传给后续用例。
 - `--storage-state`/`RUNNER_STORAGE_STATE`/`CUECAST_STORAGE_STATE` 可作为单用例只读初始状态；批次候选输出路径只应由平台后端传入。
 - 每个 case 仍复用单用例 Runner 流程；admin 批次会独立生成 `playwright-runner-artifacts/runs/<projectShortName>/<versionName>/<sceneId>/<caseId>/<yyyyMMdd>/<executionId>/`。
 - 批量汇总生成在 `playwright-runner-artifacts/batches/<batchId>/`。
@@ -791,7 +841,7 @@ CUECAST_CASE_IDS       批量 case ID，例如 278,279
 CUECAST_API_BASE       后端 API 地址
 CUECAST_TOKEN          后端鉴权 token
 RUNNER_WORKERS         批量 worker 数，默认 1
-RUNNER_SESSION_MODE    isolated | reuse-auth，默认 isolated
+RUNNER_SESSION_MODE    isolated | reuse-auth | reuse-browser，默认 isolated
 RUNNER_STORAGE_STATE   单用例或批次的只读初始 storage state 文件
 RUNNER_BROWSER         chromium | firefox | webkit，默认 chromium
 RUNNER_BROWSER_EXECUTABLE_PATH 可选浏览器可执行文件绝对路径
@@ -799,7 +849,7 @@ RUNNER_LOCATOR_MODE    legacy | semantic-v1，默认 legacy
 RUNNER_PAGE_ERROR_CHECK_ENABLED 留空继承用例，true | false 为任务级覆盖
 RUNNER_HEADED          true | false，默认 false
 RUNNER_TRACE           on | off | retain-on-failure，批量默认 retain-on-failure
-RUNNER_VIDEO           on | off | retain-on-failure，批量默认 retain-on-failure
+RUNNER_VIDEO           on | off | retain-on-failure；reuse-browser 同样按用例生成录屏
 RUNNER_ARTIFACT_DIR    产物根目录，默认 playwright-runner-artifacts
 RUNNER_STEP_TIMEOUT_MS 单步超时
 RUNNER_CASE_TIMEOUT_MS 单 case 超时

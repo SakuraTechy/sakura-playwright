@@ -1,5 +1,6 @@
 import { RunnerError } from '../shared/utils.js';
 import { hasBrowserSteps } from './infrastructure-step-runner.js';
+import { adaptCuecastRecordedStep } from './cuecast-recorded-step-adapter.js';
 
 export function normalizeCase(testCase, options = {}) {
   if (!testCase || typeof testCase !== 'object') {
@@ -20,24 +21,27 @@ export function normalizeCase(testCase, options = {}) {
 
 export function normalizeSteps(rawSteps, startStep = 0) {
   const steps = (Array.isArray(rawSteps) ? rawSteps : [])
-    .map((step, index) => ({
-      // 基础设施步骤的 target_ref、SQL 参数和原生数据库操作由 Runner 原样保留。
-      // 它们的实际命令与凭据仍只在服务端冻结快照中解析，不由此处生成或补全。
-      ...step,
-      id: step.id ?? index + 1,
-      original_step_id: step.original_step_id ?? null,
-      step_index: Number.isInteger(Number(step.step_index)) ? Number(step.step_index) : index,
-      action_type: String(step.action_type || 'click').trim().toLowerCase(),
-      target_selector: step.target_selector ?? '',
-      target_xpath: step.target_xpath ?? '',
-      locator_meta: step.locator_meta ?? null,
-      value: step.value ?? '',
-      value_masked: step.value_masked === true || step.value_masked === 1 || step.value_masked === '1' ? 1 : 0,
-      url: step.url ?? '',
-      description: step.description ?? '',
-      wait_before: Number(step.wait_before) || 0,
-      is_overlay: step.is_overlay === true || step.is_overlay === 1 || step.is_overlay === '1' ? 1 : 0,
-    }))
+    .map((rawStep, index) => {
+      const step = adaptCuecastRecordedStep(rawStep);
+      return ({
+        // 基础设施步骤的 target_ref、SQL 参数和原生数据库操作由 Runner 原样保留。
+        // 它们的实际命令与凭据仍只在服务端冻结快照中解析，不由此处生成或补全。
+        ...step,
+        id: step.id ?? index + 1,
+        original_step_id: step.original_step_id ?? null,
+        step_index: Number.isInteger(Number(step.step_index)) ? Number(step.step_index) : index,
+        action_type: String(step.action_type || 'click').trim().toLowerCase(),
+        target_selector: step.target_selector ?? '',
+        target_xpath: step.target_xpath ?? '',
+        locator_meta: step.locator_meta ?? null,
+        value: step.value ?? '',
+        value_masked: step.value_masked === true || step.value_masked === 1 || step.value_masked === '1' ? 1 : 0,
+        url: step.url ?? '',
+        description: step.description ?? '',
+        wait_before: Number(step.wait_before) || 0,
+        is_overlay: step.is_overlay === true || step.is_overlay === 1 || step.is_overlay === '1' ? 1 : 0,
+      });
+    })
     .sort((a, b) => a.step_index - b.step_index);
 
   return ensureUniqueStepIds(steps).filter((_, index) => index >= startStep);

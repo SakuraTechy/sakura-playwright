@@ -45,6 +45,7 @@ export async function createRunArtifacts({ artifactDir, caseId, testCase, runId:
     failureHtmlPath: path.join(runDir, 'failure.html'),
     failureTextPath: path.join(domDir, 'failure-text.txt'),
     tracePath: path.join(runDir, 'trace.zip'),
+    videoPath: path.join(runDir, 'video.webm'),
   };
 }
 
@@ -117,6 +118,19 @@ export async function collectVideoArtifact(page, result, keep) {
   if (!video) return result;
   const videoPath = await video.path().catch(() => '');
   if (!videoPath) return result;
+  if (keep) {
+    result.artifacts.video = videoPath;
+    result.artifacts.videos.push(videoPath);
+    return result;
+  }
+  await fs.unlink(videoPath).catch(() => {});
+  return result;
+}
+
+export async function collectScreencastArtifact(videoPath, result, keep) {
+  if (!videoPath) return result;
+  const stat = await fs.stat(videoPath).catch(() => null);
+  if (!stat?.isFile() || stat.size <= 0) return result;
   if (keep) {
     result.artifacts.video = videoPath;
     result.artifacts.videos.push(videoPath);

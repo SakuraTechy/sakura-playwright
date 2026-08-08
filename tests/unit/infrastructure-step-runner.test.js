@@ -63,6 +63,120 @@ test('database step creates a server-resolved task without sending SQL or target
   assert.equal(logs.length, 1);
 });
 
+test('infrastructure task carries the execution capability without step secrets', async () => {
+  let request;
+  const api = {
+    adminApi: true,
+    createInfrastructureTask: async (payload) => {
+      request = payload;
+      return { task_id: 'INFRA_CAP', status: 'passed', duration_ms: 1 };
+    },
+    getInfrastructureTask: async () => { throw new Error('should not poll terminal task'); },
+    cancelInfrastructureTask: async () => {},
+  };
+  await runInfrastructureStep({ id: 'SCENE:CASE' }, {
+    id: 'STEP_CAP', step_index: 0, action_type: 'server_command', command: 'secret',
+  }, {
+    api,
+    infrastructureExecution: { caseKey: 'SCENE:CASE', executionCapability: 'capability-1' },
+  });
+  assert.equal(request.executionCapability, 'capability-1');
+  assert.equal('command' in request, false);
+});
+
+test('infrastructure result preview is written into step.details', async () => {
+  const api = {
+    adminApi: true,
+    createInfrastructureTask: async () => ({
+      task_id: 'INFRA_PREVIEW', status: 'passed', duration_ms: 8, executor: 'sakura-execution-agent',
+      result: {
+        infrastructure: {
+          kind: 'DATABASE_QUERY', rowCount: 1, truncated: false,
+          resultSets: [{ columns: ['user_id'], rows: [{ user_id: 1 }] }],
+          stdout: '', stderr: '', artifact: { available: false },
+        },
+      },
+    }),
+    getInfrastructureTask: async () => { throw new Error('should not poll terminal task'); },
+    cancelInfrastructureTask: async () => {},
+  };
+  const result = await runInfrastructureStep({ id: 'SCENE:CASE' }, {
+    id: 'STEP_PREVIEW', step_index: 4, action_type: 'database_sql',
+  }, { api, infrastructureExecution: { caseKey: 'SCENE:CASE' } });
+  assert.equal(result.details.infrastructure.kind, 'DATABASE_QUERY');
+  assert.equal(result.details.infrastructure.resultSets[0].rows[0].user_id, 1);
+});
+
+test('schema v2 keeps ordered rows and duplicate column labels in step.details', async () => {
+  const api = {
+    adminApi: true,
+    createInfrastructureTask: async () => ({
+      task_id: 'INFRA_V2', status: 'passed', result: {
+        infrastructure: {
+          schemaVersion: 2, kind: 'DATABASE_CALL', durationMs: 9, warnings: [], truncated: false,
+          results: [{
+            type: 'ROW_SET',
+            columns: [
+              { name: 'left_id', label: 'id', jdbcType: -5, typeName: 'BIGINT', nullable: false },
+              { name: 'right_id', label: 'id', jdbcType: -5, typeName: 'BIGINT', nullable: false },
+            ],
+            rows: [[1, 2]], rowCount: 1, truncated: false,
+          }],
+        },
+      },
+    }),
+    getInfrastructureTask: async () => { throw new Error('should not poll terminal task'); },
+    cancelInfrastructureTask: async () => {},
+  };
+
+  const result = await runInfrastructureStep({ id: 'SCENE:CASE' }, {
+    id: 'STEP_V2', step_index: 5, action_type: 'database_sql',
+  }, { api, infrastructureExecution: { caseKey: 'SCENE:CASE' } });
+
+  assert.deepEqual(result.details.infrastructure.results[0].rows[0], [1, 2]);
+  assert.deepEqual(result.details.infrastructure.results[0].columns.map((column) => column.label), ['id', 'id']);
+});
+
+test('unsupported infrastructure result schema fails explicitly', async () => {
+  const api = {
+    adminApi: true,
+    createInfrastructureTask: async () => ({
+      task_id: 'INFRA_V3', status: 'passed', result: { infrastructure: { schemaVersion: 3, results: [] } },
+    }),
+    getInfrastructureTask: async () => { throw new Error('should not poll terminal task'); },
+    cancelInfrastructureTask: async () => {},
+  };
+
+  await assert.rejects(
+    runInfrastructureStep({ id: 'SCENE:CASE' }, {
+      id: 'STEP_V3', step_index: 6, action_type: 'database_sql',
+    }, { api, infrastructureExecution: { caseKey: 'SCENE:CASE' } }),
+    (error) => error?.code === 'RESULT_SCHEMA_UNSUPPORTED',
+  );
+});
+
+test('failed infrastructure step keeps result preview in details', async () => {
+  const api = {
+    adminApi: true,
+    createInfrastructureTask: async () => ({
+      task_id: 'INFRA_FAILED', status: 'failed', duration_ms: 12, error_code: 'HOST_COMMAND_EXIT_NON_ZERO',
+      error_message: '命令退出码非零', result: {
+        infrastructure: { kind: 'SERVER_COMMAND', exitCode: 2, rowCount: 0, truncated: false, stdout: 'partial', stderr: 'boom' },
+      },
+    }),
+    getInfrastructureTask: async () => { throw new Error('should not poll terminal task'); },
+    cancelInfrastructureTask: async () => {},
+  };
+  await assert.rejects(
+    runInfrastructureStep({ id: 'SCENE:CASE' }, {
+      id: 'STEP_FAILED', step_index: 5, action_type: 'server_command',
+    }, { api, infrastructureExecution: { caseKey: 'SCENE:CASE' } }),
+    (error) => error?.code === 'INFRASTRUCTURE_STEP_FAILED'
+      && error?.details?.infrastructure?.kind === 'SERVER_COMMAND'
+      && error?.details?.infrastructure?.exitCode === 2,
+  );
+});
+
 test('infrastructure step only sends referenced runtime bindings', async () => {
   let request;
   const api = {

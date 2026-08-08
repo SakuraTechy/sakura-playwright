@@ -1,17 +1,22 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { RunnerError } from '../shared/utils.js';
 
 export class ApiClient {
-  constructor({ apiBase, token = '', timeoutMs = 30000, adminApi = false, projectEnvironmentId = '' }) {
+  constructor({ apiBase, token = '', accessKey = '', secretKey = '', timeoutMs = 30000, adminApi = false, projectEnvironmentId = '', batchId = '', executionCapability = '' }) {
     this.apiBase = apiBase;
     this.token = token;
+    this.accessKey = accessKey;
+    this.secretKey = secretKey;
     this.timeoutMs = timeoutMs;
     this.adminApi = adminApi;
     this.projectEnvironmentId = projectEnvironmentId;
+    this.batchId = batchId;
+    this.executionCapability = executionCapability;
   }
 
-  async request(method, path, body = undefined) {
+  async request(method, path, body = undefined, requestOptions = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     const headers = { 'Content-Type': 'application/json' };
@@ -20,6 +25,10 @@ export class ApiClient {
       headers.Authorization = this.adminApi && !/^Bearer\s+/i.test(this.token)
         ? `Bearer ${this.token}`
         : this.token;
+    }
+    if (requestOptions.executionCapability || this.executionCapability) {
+      // 短期执行能力只通过请求头传递，避免进入 URL、访问日志或任务结果。
+      headers['X-Execution-Capability'] = requestOptions.executionCapability || this.executionCapability;
     }
 
     try {
@@ -31,7 +40,7 @@ export class ApiClient {
       }
       for (let index = 0; index < bases.length; index += 1) {
         const base = bases[index];
-        const res = await fetch(`${base}${path}`, {
+        const res = await fetch(this.buildRequestUrl(base, path), {
           method,
           headers,
           signal: controller.signal,
@@ -72,7 +81,9 @@ export class ApiClient {
       ? `/automation/playwright/testcases/${encodeAdminCasePath(caseId)}`
       : `/testcases/${encodeURIComponent(caseId)}?raw_values=1`;
     if (this.adminApi && this.projectEnvironmentId) {
-      path += `?projectEnvironmentId=${encodeURIComponent(this.projectEnvironmentId)}`;
+      const query = new URLSearchParams({ projectEnvironmentId: this.projectEnvironmentId });
+      if (this.batchId) query.set('batchId', this.batchId);
+      path += `?${query.toString()}`;
     }
     const res = await this.request('GET', path);
     return res.data;
@@ -82,13 +93,18 @@ export class ApiClient {
     const path = this.adminApi
       ? `/automation/playwright/testcases/${encodeAdminCasePath(caseId)}/results`
       : `/testcases/${encodeURIComponent(caseId)}/results`;
-    const res = await this.request('POST', path, result);
+    // 结果回传也必须携带批次 capability，后端据此限制服务主体只能写入当前执行批次。
+    const res = await this.request('POST', path, result, {
+      executionCapability: this.executionCapability,
+    });
     return res.data;
   }
 
   async createInfrastructureTask(task) {
     this.requireAdminApi('create infrastructure task');
-    const res = await this.request('POST', '/automation/infrastructure/tasks', task);
+    const res = await this.request('POST', '/automation/infrastructure/tasks', task, {
+      executionCapability: task?.executionCapability || '',
+    });
     return res.data;
   }
 
@@ -97,7 +113,7 @@ export class ApiClient {
     const query = Number.isFinite(Number(afterSequence)) && Number(afterSequence) >= 0
       ? `?afterSequence=${encodeURIComponent(afterSequence)}`
       : '';
-    const res = await this.request('GET', `/automation/infrastructure/tasks/${encodeURIComponent(taskId)}${query}`);
+    const res = await this.request('GET', `/automation/infrastructure/tasks/${encodeURIComponent(taskId)}${query}`, undefined, {});
     return res.data;
   }
 
@@ -143,7 +159,7 @@ export class ApiClient {
       const bases = [this.apiBase];
       if (/\/api$/i.test(this.apiBase)) bases.push(this.apiBase.slice(0, -4));
       for (let index = 0; index < bases.length; index += 1) {
-        const res = await fetch(`${bases[index]}/automation/playwright/artifacts`, {
+        const res = await fetch(this.buildRequestUrl(bases[index], '/automation/playwright/artifacts'), {
           method: 'POST',
           headers,
           body: form,
@@ -180,7 +196,10 @@ export class ApiClient {
       const bases = [this.apiBase];
       if (/\/api$/i.test(this.apiBase)) bases.push(this.apiBase.slice(0, -4));
       for (let index = 0; index < bases.length; index += 1) {
-        const res = await fetch(`${bases[index]}/automation/playwright/runner/jobs/${encodeURIComponent(jobId)}/live-frame`, {
+        const res = await fetch(this.buildRequestUrl(
+          bases[index],
+          `/automation/playwright/runner/jobs/${encodeURIComponent(jobId)}/live-frame`,
+        ), {
           method: 'PUT',
           headers,
           body: frame,
@@ -209,6 +228,26 @@ export class ApiClient {
     if (!this.adminApi) {
       throw new RunnerError('INFRASTRUCTURE_UNAVAILABLE', `Cannot ${operation} without --admin-api`);
     }
+  }
+
+  buildRequestUrl(base, requestPath) {
+    const url = new URL(`${base}${requestPath}`, base);
+    if (!this.adminApi || (!this.accessKey && !this.secretKey)) return url.toString();
+    if (!this.accessKey || !this.secretKey) {
+      throw new RunnerError('CONFIG_INVALID', 'SAKURA_ADMIN_ACCESS_KEY 和 SAKURA_ADMIN_SECRET_KEY 必须同时配置');
+    }
+    const params = url.searchParams;
+    params.set('accessKey', this.accessKey);
+    params.set('timestamp', String(Date.now()));
+    params.set('nonce', crypto.randomBytes(16).toString('hex'));
+    params.delete('sign');
+    const signedParams = [...params.entries(), ['key', this.secretKey]]
+      .filter(([, value]) => value !== '')
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, value]) => `${key}=${value}`)
+      .join('&');
+    params.set('sign', crypto.createHash('md5').update(signedParams).digest('hex'));
+    return url.toString();
   }
 }
 

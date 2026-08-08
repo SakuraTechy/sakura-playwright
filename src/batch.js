@@ -4,25 +4,27 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { formatPlatformDateTime, loadRunnerEnv, parseBoolean, parseCliArgs, parsePositiveInt, timestampForPath, trimTrailingSlash } from './shared/utils.js';
+import { formatPlatformDateTime, loadRunnerEnv, parseBoolean, parseCliArgs, parsePositiveInt, sleep, timestampForPath, trimTrailingSlash } from './shared/utils.js';
 import { promoteStorageState } from './runner/session-state.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const runnerPath = path.join(__dirname, 'index.js');
+const browserSessionHostPath = path.join(__dirname, 'browser-session-host.js');
 
 async function main() {
   const config = parseBatchArgs();
   const startedAt = Date.now();
   const batchId = `batch-${timestampForPath()}`;
   const batchDir = path.resolve(process.cwd(), config.artifactDir, 'batches', batchId);
-  const session = await createBatchSession(config, batchId);
   const activeChildren = new Set();
   const control = { cancelled: false };
   const removeSignalHandlers = installSignalHandlers(activeChildren, control);
-  await fs.mkdir(batchDir, { recursive: true });
+  let session;
 
   try {
+    session = await createBatchSession(config, batchId, activeChildren);
+    await fs.mkdir(batchDir, { recursive: true });
     const results = await runCasePool(config, batchId, session, activeChildren, control);
     const summary = createSummary({ batchId, batchDir, config, results, startedAt });
     const summaryPath = path.join(batchDir, 'summary.json');
@@ -36,6 +38,7 @@ async function main() {
     if (summary.failed > 0 || control.cancelled) process.exitCode = control.cancelled ? 130 : 1;
   } finally {
     removeSignalHandlers();
+    await stopBrowserSession(session, activeChildren);
     if (session?.directory) {
       await fs.rm(session.directory, { recursive: true, force: true }).catch(() => {});
     }
@@ -54,23 +57,26 @@ function parseBatchArgs(argv = process.argv.slice(2), env = process.env) {
   const requestedWorkers = parsePositiveInt(args.workers || mergedEnv.RUNNER_WORKERS, 1);
   const workers = Math.min(requestedWorkers, caseIds.length);
   const sessionMode = args['session-mode'] || mergedEnv.RUNNER_SESSION_MODE || 'isolated';
-  if (!['isolated', 'reuse-auth'].includes(sessionMode)) {
+  if (!['isolated', 'reuse-auth', 'reuse-browser'].includes(sessionMode)) {
     throw new Error(`Unsupported session mode: ${sessionMode}`);
   }
-  if (sessionMode === 'reuse-auth' && requestedWorkers !== 1) {
-    throw new Error('reuse-auth session mode requires --workers 1');
+  if (sessionMode !== 'isolated' && requestedWorkers !== 1) {
+    throw new Error(`${sessionMode} session mode requires --workers 1`);
   }
+  const video = args.video || mergedEnv.RUNNER_VIDEO || 'retain-on-failure';
   return {
     caseIds,
     apiBase: trimTrailingSlash(args['api-base'] || mergedEnv.CUECAST_API_BASE || 'http://127.0.0.1:4173/api'),
     adminApi: parseBoolean(args['admin-api'] ?? (args['api-base'] == null ? mergedEnv.CUECAST_ADMIN_API : false), false),
     token: args.token || mergedEnv.CUECAST_TOKEN || '',
+    executionCapability: args['execution-capability'] || mergedEnv.CUECAST_EXECUTION_CAPABILITY || '',
     browser: args.browser || mergedEnv.RUNNER_BROWSER || 'chromium',
     headed: parseBoolean(args.headed ?? mergedEnv.RUNNER_HEADED, false),
+    ignoreHttpsErrors: parseBoolean(args['ignore-https-errors'] ?? mergedEnv.RUNNER_IGNORE_HTTPS_ERRORS, false),
     slowMo: args['slow-mo'] || mergedEnv.RUNNER_SLOW_MO_MS || '',
     finishDelay: args['finish-delay'] || mergedEnv.RUNNER_FINISH_DELAY_MS || '',
     trace: args.trace || mergedEnv.RUNNER_TRACE || 'retain-on-failure',
-    video: args.video || mergedEnv.RUNNER_VIDEO || 'retain-on-failure',
+    video,
     timeout: args.timeout || mergedEnv.RUNNER_STEP_TIMEOUT_MS || '',
     caseTimeout: args['case-timeout'] || mergedEnv.RUNNER_CASE_TIMEOUT_MS || '',
     startStep: args['start-step'] || '',
@@ -97,6 +103,12 @@ async function runCasePool(config, batchId, session, activeChildren, control) {
       const { caseId, index } = queue.shift();
       const result = await runOneCase(caseId, index, config, batchId, session, activeChildren);
       results.push(result);
+      if (!result.success && session?.kind === 'browser') {
+        await stopBrowserSession(session, activeChildren);
+        if (queue.length && !control.cancelled) {
+          await startBrowserSession(session, config, activeChildren);
+        }
+      }
     }
   }));
   const order = new Map(config.caseIds.map((caseId, index) => [String(caseId), index]));
@@ -105,10 +117,10 @@ async function runCasePool(config, batchId, session, activeChildren, control) {
 
 async function runOneCase(caseId, caseIndex, config, batchId, session, activeChildren) {
   const startedAt = Date.now();
-  const storageStateInput = session
+  const storageStateInput = session?.kind === 'auth'
     ? await existingStorageState(session.currentPath, config.storageState)
     : config.storageState;
-  const storageStateOutput = session
+  const storageStateOutput = session?.kind === 'auth'
     ? path.join(session.candidatesDir, `${caseIndex}-${safePathSegment(caseId)}.json`)
     : '';
   const args = [
@@ -119,6 +131,7 @@ async function runOneCase(caseId, caseIndex, config, batchId, session, activeChi
     '--admin-api', String(config.adminApi),
     '--browser', config.browser,
     '--headed', String(config.headed),
+    '--ignore-https-errors', String(config.ignoreHttpsErrors),
     '--trace', config.trace,
     '--video', config.video,
     '--session-mode', config.sessionMode,
@@ -127,6 +140,7 @@ async function runOneCase(caseId, caseIndex, config, batchId, session, activeChi
   if (storageStateInput) args.push('--storage-state', storageStateInput);
   if (storageStateOutput) args.push('--storage-state-out', storageStateOutput);
   if (config.token) args.push('--token', config.token);
+  if (config.executionCapability) args.push('--execution-capability', config.executionCapability);
   if (config.timeout) args.push('--timeout', String(config.timeout));
   if (config.caseTimeout) args.push('--case-timeout', String(config.caseTimeout));
   if (config.startStep) args.push('--start-step', String(config.startStep));
@@ -136,7 +150,12 @@ async function runOneCase(caseId, caseIndex, config, batchId, session, activeChi
   return new Promise((resolve) => {
     const child = spawn(process.execPath, args, {
       cwd: process.cwd(),
-      env: { ...process.env },
+      env: {
+        ...process.env,
+        ...(session?.kind === 'browser'
+          ? { SAKURA_PLAYWRIGHT_BROWSER_SESSION_ENDPOINT: session.endpoint }
+          : {}),
+      },
       windowsHide: true,
     });
     activeChildren.add(child);
@@ -153,7 +172,7 @@ async function runOneCase(caseId, caseIndex, config, batchId, session, activeChi
       const resultPath = artifactDir ? path.join(artifactDir, 'result.json') : '';
       const resultJson = await readJson(resultPath);
       let success = code === 0;
-      if (success && session) {
+      if (success && session?.kind === 'auth') {
         try {
           await promoteStorageState(storageStateOutput, session.currentPath);
         } catch (error) {
@@ -181,16 +200,94 @@ async function runOneCase(caseId, caseIndex, config, batchId, session, activeChi
   });
 }
 
-async function createBatchSession(config, batchId) {
-  if (config.sessionMode !== 'reuse-auth') return null;
+async function createBatchSession(config, batchId, activeChildren) {
+  if (config.sessionMode === 'isolated') return null;
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), `${safePathSegment(batchId)}-`));
+  if (config.sessionMode === 'reuse-browser') {
+    const session = { kind: 'browser', directory, endpoint: '', host: null };
+    try {
+      await startBrowserSession(session, config, activeChildren);
+      return session;
+    } catch (error) {
+      await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
+      throw error;
+    }
+  }
   const candidatesDir = path.join(directory, 'candidates');
   await fs.mkdir(candidatesDir, { recursive: true });
   return {
+    kind: 'auth',
     directory,
     currentPath: path.join(directory, 'current.json'),
     candidatesDir,
   };
+}
+
+async function startBrowserSession(session, config, activeChildren) {
+  const endpointFile = path.join(session.directory, 'endpoint.json');
+  await fs.rm(endpointFile, { force: true }).catch(() => {});
+  const args = [
+    browserSessionHostPath,
+    '--endpoint-file', endpointFile,
+    '--browser', config.browser,
+    '--headed', String(config.headed),
+    '--ignore-https-errors', String(config.ignoreHttpsErrors),
+    '--slow-mo', String(config.slowMo || 0),
+  ];
+  const host = spawn(process.execPath, args, {
+    cwd: process.cwd(),
+    env: { ...process.env },
+    windowsHide: true,
+  });
+  session.host = host;
+  session.endpoint = '';
+  activeChildren.add(host);
+  let output = '';
+  host.stdout.on('data', (chunk) => { output += chunk.toString(); });
+  host.stderr.on('data', (chunk) => { output += chunk.toString(); });
+  host.once('close', () => activeChildren.delete(host));
+  try {
+    session.endpoint = await waitForBrowserEndpoint(endpointFile, host, () => output);
+  } catch (error) {
+    activeChildren.delete(host);
+    if (host.exitCode == null) host.kill();
+    session.host = null;
+    throw error;
+  }
+}
+
+async function waitForBrowserEndpoint(endpointFile, host, getOutput) {
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    if (host.exitCode != null) {
+      throw new Error(`Browser session host exited before startup: ${getOutput().trim()}`);
+    }
+    const value = await readJson(endpointFile);
+    if (value?.endpoint) return String(value.endpoint);
+    await sleep(50);
+  }
+  host.kill();
+  throw new Error(`Browser session host startup timed out: ${getOutput().trim()}`);
+}
+
+async function stopBrowserSession(session, activeChildren) {
+  if (session?.kind !== 'browser' || !session.host) return;
+  const host = session.host;
+  session.host = null;
+  session.endpoint = '';
+  activeChildren.delete(host);
+  if (host.exitCode == null) host.kill();
+  await new Promise((resolve) => {
+    if (host.exitCode != null) return resolve();
+    const timer = setTimeout(() => {
+      if (host.exitCode == null) host.kill('SIGKILL');
+      resolve();
+    }, 3000);
+    host.once('close', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
 }
 
 async function existingStorageState(currentPath, initialPath) {

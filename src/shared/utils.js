@@ -25,12 +25,15 @@ export function parseArgs(argv = process.argv.slice(2), env = process.env) {
     runId: args['run-id'] || mergedEnv.CUECAST_RUN_ID || '',
     jobId: args['job-id'] || mergedEnv.CUECAST_JOB_ID || '',
     executionId: args['execution-id'] || mergedEnv.CUECAST_EXECUTION_ID || '',
+    executionCapability: args['execution-capability'] || mergedEnv.CUECAST_EXECUTION_CAPABILITY || '',
     projectEnvironmentId: args['project-environment-id'] || mergedEnv.CUECAST_PROJECT_ENVIRONMENT_ID || '',
     apiBase: trimTrailingSlash(args['api-base'] || mergedEnv.CUECAST_API_BASE || 'http://127.0.0.1:4173/api'),
     // 平台任务未传 API 地址时使用 .env 的 admin 协议；旧 test-lab 命令显式传入 mock API 时保持原协议。
     // --admin-api 始终拥有最高优先级，可覆盖这两个默认分支。
     adminApi: parseBoolean(args['admin-api'] ?? (args['api-base'] == null ? mergedEnv.CUECAST_ADMIN_API : false), false),
     token: args.token || mergedEnv.CUECAST_TOKEN || '',
+    accessKey: mergedEnv.SAKURA_ADMIN_ACCESS_KEY || mergedEnv.CUECAST_ACCESS_KEY || '',
+    secretKey: mergedEnv.SAKURA_ADMIN_SECRET_KEY || mergedEnv.CUECAST_SECRET_KEY || '',
     browser: args.browser || mergedEnv.RUNNER_BROWSER || 'chromium',
     browserExecutablePath: args['browser-executable-path'] || mergedEnv.RUNNER_BROWSER_EXECUTABLE_PATH || '',
     liveFrameQuality: args['live-frame-quality'] || mergedEnv.RUNNER_LIVE_FRAME_QUALITY || 'smooth',
@@ -39,7 +42,12 @@ export function parseArgs(argv = process.argv.slice(2), env = process.env) {
     pageErrorCheckEnabled: parseOptionalBoolean(
       args['page-error-check-enabled'] ?? mergedEnv.RUNNER_PAGE_ERROR_CHECK_ENABLED,
     ),
+    operationDiagnosticEnabled: parseBoolean(
+      args['operation-diagnostic-enabled'] ?? mergedEnv.RUNNER_OPERATION_DIAGNOSTIC_ENABLED,
+      true,
+    ),
     sessionMode: args['session-mode'] || mergedEnv.RUNNER_SESSION_MODE || 'isolated',
+    browserSessionEndpoint: mergedEnv.SAKURA_PLAYWRIGHT_BROWSER_SESSION_ENDPOINT || '',
     storageState: args['storage-state'] || mergedEnv.RUNNER_STORAGE_STATE || mergedEnv.CUECAST_STORAGE_STATE || '',
     storageStateOut: args['storage-state-out'] || '',
     locatorMode: args['locator-mode'] || mergedEnv.RUNNER_LOCATOR_MODE || 'legacy',
@@ -88,7 +96,7 @@ export function parseArgs(argv = process.argv.slice(2), env = process.env) {
   if (!['legacy', 'semantic-v1'].includes(config.locatorMode)) {
     throw new RunnerError('CONFIG_INVALID', `Unsupported locator mode: ${config.locatorMode}`);
   }
-  if (!['isolated', 'reuse-auth'].includes(config.sessionMode)) {
+  if (!['isolated', 'reuse-auth', 'reuse-browser'].includes(config.sessionMode)) {
     throw new RunnerError('CONFIG_INVALID', `Unsupported session mode: ${config.sessionMode}`);
   }
   if (config.sessionMode === 'reuse-auth' && !config.batchId) {
@@ -96,6 +104,12 @@ export function parseArgs(argv = process.argv.slice(2), env = process.env) {
   }
   if (config.sessionMode === 'reuse-auth' && !config.storageStateOut) {
     throw new RunnerError('CONFIG_INVALID', 'reuse-auth session mode requires --storage-state-out');
+  }
+  if (config.sessionMode === 'reuse-browser' && !config.batchId) {
+    throw new RunnerError('CONFIG_INVALID', 'reuse-browser session mode requires --batch-id');
+  }
+  if (config.sessionMode === 'reuse-browser' && !config.browserSessionEndpoint) {
+    throw new RunnerError('CONFIG_INVALID', 'reuse-browser session mode requires a managed browser endpoint');
   }
   if (!['off', 'on', 'retain-on-failure'].includes(config.trace)) {
     throw new RunnerError('CONFIG_INVALID', `Unsupported trace policy: ${config.trace}`);
@@ -105,6 +119,10 @@ export function parseArgs(argv = process.argv.slice(2), env = process.env) {
   }
   if (config.caseTimeoutMs < config.timeoutMs) {
     throw new RunnerError('CONFIG_INVALID', 'Case timeout cannot be smaller than step timeout');
+  }
+  if (config.adminApi && !config.projectEnvironmentId) {
+    // Admin 用例读取必须绑定产品环境，避免 Runner 直接执行数据库中的绝对地址。
+    throw new RunnerError('CONFIG_INVALID', 'Admin API execution requires --project-environment-id');
   }
   return config;
 }
