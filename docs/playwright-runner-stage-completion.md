@@ -30,6 +30,28 @@
 | M4 | CI 和批量执行 | 通过 | 批量入口、mock 批量 job API、CI 模板已实现并通过本地 mock 验收 |
 | M5 | 高级能力 | 部分通过 | M5-A 至 M5-O 已完成 iframe、文件上传、多文件上传、隐藏上传代理、下载断言、高级下载校验、二进制下载校验、JSON/API、Monaco 输入、Monaco 快捷键、树定位、展开/复选树、多窗口基础切换、多窗口显式切换和关闭、多 popup 选择、网络 mock、类 HAR 回放、请求断言、响应断言、响应快照、快照基线对比、请求数量断言、失败注入专项 case、Playwright/pytest 脚本导出、复杂定位导出、高级动作导出和导出 Playwright 端到端执行并通过 mock 验收 |
 
+## 2026-08-11：Element Message 断言定位一致性修复
+
+### 完成情况
+
+| 事项 | 结果 |
+| --- | --- |
+| Element UI 通知浮层识别 | Runner 与 CueCast 对直属 `body` 的 `fixed/absolute` 通知使用同一浮层规则，`el-message` 不再因 `overlay=true` 被错误过滤 |
+| 录制 XPath 稳定性 | CueCast 计算绝对 XPath 时忽略自身 `__at_*` 工具栏和弹窗节点，避免录制页与回放页产生 `/div[6]` 与 `/div[5]` 的下标偏移 |
+| 通知文本回退 | `p` 元素断言保存 `text_exact` 和 `text_exact_tag` 候选，CSS/XPath 变化时仍可按通知文本定位 |
+
+### 验证
+
+- CueCast `node --test tests/*.test.js`：31/31 通过。
+- Runner `npm run check`：通过。
+- Runner `npm run test:unit`：86/86 通过。
+- Runner `npm run test:locator`：15/15 通过，新增固定 Element Message 浮层断言回归用例通过。
+- 用户执行 Trace `data/file/automation/playwright/AAS_P/V6.5B06D011/AAS_P_SMOKE_001/SCENE_CASE_006/20260811/20260811150048` 已确认 CSS 首轮命中但被浮层语义过滤；修复后本地回归复现为 `1/1`。
+
+### 遗留验证
+
+- 独立 CLI 复跑真实用例时 Admin 返回 `401：您的登录状态已过期，请重新登录`，当前环境没有可控的已登录 Chrome 会话，尚未生成新的真实平台执行记录。
+
 ## 2026-08-07：同一浏览器窗口连续执行
 
 ### 完成情况
@@ -39,7 +61,7 @@
 | 新会话模式 | 新增 `reuse-browser`，同一批次的独立 Runner 进程连接同一个 Browser、Context 和当前页面 |
 | 页面连续性 | 同源非登录业务页直接交给下一条用例，保留 sessionStorage、IndexedDB、页面内存和运行时 DOM 状态 |
 | 生命周期 | 仅允许串行；失败、取消、批次终态或 admin 停止时关闭共享宿主，不影响默认 `isolated` 和 `reuse-auth` |
-| 产物边界 | Trace、失败截图和结果仍按用例生成；`video=on|off|retain-on-failure` 均可用，每条 Runner 在共享 Page 上独立启停 screencast 并生成分段 WebM，不关闭共享 Context |
+| 产物边界 | Trace、失败截图和结果仍按用例生成；`video=on|off|retain-on-failure` 均可用，共享宿主原生录制批次 WebM，批次结束后按用例时间切片，不关闭共享 Context |
 | 安全边界 | WebSocket 端点只绑定 `127.0.0.1`，由服务端通过子进程环境变量传递，不写入日志、场景或接口响应 |
 
 ### 验证

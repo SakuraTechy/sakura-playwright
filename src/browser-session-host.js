@@ -13,6 +13,8 @@ async function main() {
   const headed = parseBoolean(args.headed, false);
   const ignoreHTTPSErrors = parseBoolean(args['ignore-https-errors'], false);
   const slowMo = parseNonNegativeInt(args['slow-mo'], 0);
+  const video = String(args.video || 'off').trim().toLowerCase();
+  const recordingManifestFile = String(args['recording-manifest-file'] || '').trim();
   if (!browserTypes[browserName]) throw new Error(`Unsupported browser: ${browserName}`);
   if (!endpointFile) throw new Error('Missing required --endpoint-file');
 
@@ -22,15 +24,30 @@ async function main() {
     slowMo,
     ...(launchArgs.length ? { args: launchArgs } : {}),
   });
+  const recordingStartedAt = Date.now();
+  const recordVideo = video === 'on' || video === 'retain-on-failure';
   const context = await browser.newContext({
     ignoreHTTPSErrors,
     ...(headed ? { viewport: null } : {}),
+    ...(recordVideo ? {
+      recordVideo: {
+        dir: path.dirname(path.resolve(recordingManifestFile || endpointFile)),
+        ...(headed && browserName === 'chromium'
+          ? { size: { width: 1920, height: 991 } }
+          : {}),
+      },
+    } : {}),
   });
-  await context.newPage();
+  const page = await context.newPage();
 
   // Context 由宿主持有；各用例 Runner 只连接并断开，不能关闭共享页面。
   const { endpoint } = await browser.bind('sakura-reuse-browser', { host: '127.0.0.1', port: 0 });
-  await writeEndpoint(endpointFile, { endpoint, browser: browserName, pid: process.pid });
+  await writeEndpoint(endpointFile, {
+    endpoint,
+    browser: browserName,
+    pid: process.pid,
+    recording_started_at: recordingStartedAt,
+  });
   console.log('[browser-session] ready');
 
   await new Promise((resolve) => {
@@ -38,12 +55,26 @@ async function main() {
     const stop = async () => {
       if (stopping) return;
       stopping = true;
+      const videoHandle = page.video?.();
       await context.close().catch(() => {});
+      const videoPath = videoHandle ? await videoHandle.path().catch(() => '') : '';
+      if (recordingManifestFile) {
+        await writeEndpoint(recordingManifestFile, {
+          video_path: videoPath || null,
+          started_at: recordingStartedAt,
+          finished_at: Date.now(),
+          video_size: headed && browserName === 'chromium' ? { width: 1920, height: 991 } : null,
+        }).catch(() => {});
+      }
       await browser.close().catch(() => {});
       resolve();
     };
     process.once('SIGINT', stop);
     process.once('SIGTERM', stop);
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (chunk) => {
+      if (String(chunk).includes('stop')) stop();
+    });
     browser.once('disconnected', resolve);
   });
 }

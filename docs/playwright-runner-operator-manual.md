@@ -34,7 +34,7 @@ admin 场景页的“扩展 CDP 回放”和“Playwright Runner 回放”共用
 
 CDP 弹窗可选择最大化、当前窗口或自定义窗口；自定义宽高范围为 `320–10000`。页面错误检测对应 `page_error_check_enabled`，“AI 深度分析”仅为预留说明。弹窗值优先于录制值，布尔值 `false` 和数值 `0` 也会作为有效覆盖值。
 
-Runner 弹窗本次任务使用中文名称展示浏览器、显示浏览器窗口、忽略 HTTPS 证书错误、追踪文件保留策略、录屏保留策略、单步骤超时、用例总超时、操作慢放、执行结束停留和页面错误检测策略。页面错误检测为三态：`继承用例` 不传任务字段，`启用` 和 `禁用` 分别显式传 `true`、`false`。对应传输字段仍为 `browser`、`headed`、`ignoreHttpsErrors`、`trace`、`video`、`stepTimeoutMs`、`caseTimeoutMs`、`slowMoMs`、`finishDelayMs`、`pageErrorCheckEnabled`。admin 创建的 Runner Job 还会固定传入 `--locator-mode semantic-v1`，使录制的候选定位、上下文评分和可交互代理转换生效；手工 CLI 与 Jenkins 默认仍是 `legacy`。admin 仅把白名单字段转换为 CLI 参数，CLI 参数优先于 `.env`；`RUNNER_WORKERS`、artifact 目录、token 和 storage state 仍由服务端管理。总用例超时会关闭 context/browser，并按失败结果正常回传。弹窗底部按 Jenkins 模板展示场景信息；当前单场景、单用例回放会使用详情页指定用例，场景入口则使用首个可执行用例。
+Runner 弹窗本次任务使用中文名称展示浏览器、显示浏览器窗口、忽略 HTTPS 证书错误、追踪文件保留策略、录屏保留策略、单步骤超时、用例总超时、操作慢放、执行结束停留和页面错误检测策略。页面错误检测为三态：`继承用例` 不传任务字段，`启用` 和 `禁用` 分别显式传 `true`、`false`。对应传输字段仍为 `browser`、`headed`、`ignoreHttpsErrors`、`trace`、`video`、`stepTimeoutMs`、`caseTimeoutMs`、`slowMoMs`、`finishDelayMs`、`pageErrorCheckEnabled`。admin 创建的 Runner Job 还会固定传入 `--locator-mode semantic-v1`，使录制的候选定位、上下文评分和可交互代理转换生效；手工 CLI 与 Jenkins 默认仍是 `legacy`。admin 仅把白名单字段转换为 CLI 参数，CLI 参数优先于 `.env`；`RUNNER_WORKERS`、artifact 目录、token 和 storage state 仍由服务端管理。总用例超时会关闭 context/browser，并按失败结果正常回传。`isolated` 和 `reuse-auth` 的有头 Chromium 保持真实窗口 viewport，仅固定原生视频输出尺寸；`reuse-browser` 使用共享 Context 的批次级原生录屏，批次结束按用例执行时间切片，不使用页面 screencast。运行环境必须可执行 `ffmpeg`。弹窗底部按 Jenkins 模板展示场景信息；当前单场景、单用例回放会使用详情页指定用例，场景入口则使用首个可执行用例。
 
 CDP/Runner 执行链路中的开始时间、结束时间、诊断日志时间和响应快照时间统一为北京时间 `yyyy-MM-dd HH:mm:ss`。admin Runner 任务状态以及写入 `AutomationUiSceneDO.debugRecord` 的顶层和 `playwrightResult` 嵌套执行时间使用同一格式；后端会在入库前递归兼容并转换旧版客户端传入的 UTC ISO 时间。admin Runner 目录使用 `yyyyMMdd/executionId`，未传执行 ID 的手工命令仍使用 `yyyyMMdd/HHmmss`。
 
@@ -251,7 +251,37 @@ node src/batch.js --case-ids 278,280 --api-base http://127.0.0.1:4173/api --work
 node src/batch.js --case-ids <ids> --api-base <apiBase> --workers 1 --session-mode reuse-browser --video retain-on-failure --headed true
 ```
 
-`reuse-browser` 只在同一批次内复用 Browser、Context、标签页、sessionStorage 和页面内存。首条用例打开录制起点；后续用例若仍在同源非登录业务页，则直接从当前页面继续。跨域、当前处于登录页、用例失败、取消或批次结束时不会沿用该页面状态。录屏可选 `on`、`off` 或 `retain-on-failure`；Runner 会在不关闭共享窗口的情况下为每条用例单独生成 WebM。
+`reuse-browser` 只在同一批次内复用 Browser、Context、标签页、sessionStorage 和页面内存。首条用例打开录制起点；后续用例若仍在同源非登录业务页，则直接从当前页面继续。跨域、当前处于登录页、用例失败、取消或批次结束时不会沿用该页面状态。录屏可选 `on`、`off` 或 `retain-on-failure`；共享宿主先录制一段原生 WebM，批次完成后使用 `ffmpeg` 按用例时间边界生成各用例视频。`retain-on-failure` 只保留失败用例切片；`on` 保留所有用例切片。
+
+## 在 admin 添加下载校验步骤
+
+在 UI 自动化场景详情中新增步骤，选择：
+
+- 操作类型：`检查操作`
+- 操作方法：`点击并校验浏览器下载文件`
+
+填写项：
+
+| 字段 | 填写方式 |
+| --- | --- |
+| 下载按钮 | 必填。填写触发下载的元素，例如 `css=button.download` 或 `xpath=//button[normalize-space()='下载']` |
+| 文件名包含 | 必填。填写浏览器建议文件名中必须包含的文本，例如 `report.xlsx` |
+| MIME 类型包含 | 可选。例如 Excel 文件可填写 `spreadsheetml.sheet` |
+| 文件内容包含 | 可选。仅适用于可按 UTF-8 读取的文本、CSV、JSON 等文件 |
+| 最小字节数 / 最大字节数 | 可选。用于排除空文件或异常大小文件 |
+| SHA256 | 可选。适用于内容固定的 Excel、PDF、压缩包等二进制文件 |
+
+`MIME 类型包含` 按下载请求的响应标头 `Content-Type` 填写，不是请求上传格式。动态文件名只出现在 `Content-Disposition` 时，Runner 也会据此匹配下载响应；例如响应标头为 `Content-Type: multipart/form-data`，该字段就填写 `multipart/form-data`。
+
+该步骤会先监听 Playwright `download` 事件，再点击下载元素，等待下载完成后保存并执行断言。Playwright 不操作 Chromium 顶部工具栏或 Windows“另存为”窗口；`acceptDownloads` 会接管下载并保存到当前用例产物目录：
+
+```text
+artifacts/runs/<projectShortName>/<versionName>/<sceneId>/<caseId>/<yyyyMMdd>/<executionId>/downloads/<文件名>
+```
+
+平台模式会把下载文件与报告、日志、`result.json` 一起上传到 admin，并保留 `downloads/<原文件名>`、`logs/<日志名>` 等逻辑相对路径。空的 `dom/`、`screenshots/` 目录不会在 admin 端创建；步骤结果中的 `downloaded_file` 会替换为受鉴权的 admin 文件地址。
+
+校验文件内容时，文本文件填写“文件内容包含”；Excel、PDF 等二进制文件使用 SHA256。执行成功后可在 `result.json` 的 `steps[].downloaded_file`、`downloaded_filename`、`downloaded_bytes`、`downloaded_mime` 和 `downloaded_sha256` 中查看结果。
 
 ## 查看执行产物
 
@@ -525,7 +555,9 @@ RUNNER_CASE_TIMEOUT_MS 单 case 超时
 
 如果下一条用例的录制起点仍是 `/login`、`/login1`、`/signin` 等登录路由，Runner 会在同源且上一条成功用例已进入非登录页面时恢复上一条最终业务页。普通业务起点、跨域地址和 `isolated` 模式不应用该规则。
 
-`reuse-browser` 同样仅允许串行批次（`workers=1`）。它由 admin 或批量 CLI 启动独立宿主，持有同一个 Browser、Context 和页面；每条用例仍使用独立 Runner 进程、Trace、截图、结果与取消状态。`video=on|off|retain-on-failure` 均受支持，录屏由每条 Runner 在共享 Page 上独立启停 screencast，形成按用例分段的 WebM，不需要关闭 Context。宿主连接端点仅绑定本机并通过子进程环境变量传递，不进入命令日志或前端响应。
+`reuse-browser` 同样仅允许串行批次（`workers=1`）。它由 admin 或批量 CLI 启动独立宿主，持有同一个 Browser、Context 和页面；每条用例仍使用独立 Runner 进程、Trace、截图、结果与取消状态。`video=on|off|retain-on-failure` 均受支持，宿主原生录制整批视频，批次结束后切出按用例分段的 WebM，不需要关闭 Context；切片依赖 `ffmpeg`。宿主连接端点仅绑定本机并通过子进程环境变量传递，不进入命令日志或前端响应。
+
+Admin 托管执行必须同步部署 `sakura-playwright/src/browser-session-host.js`、`sakura-playwright/src/batch-video-finalizer.js` 和 Admin 的共享浏览器服务改动，并重启 Admin；旧宿主仍会在 Runner 日志中出现 `录屏尺寸=...`，表示走的是兼容 screencast 路径。
 
 会话复用排查日志位于：
 

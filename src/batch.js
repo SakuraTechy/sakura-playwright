@@ -6,6 +6,8 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { formatPlatformDateTime, loadRunnerEnv, parseBoolean, parseCliArgs, parsePositiveInt, sleep, timestampForPath, trimTrailingSlash } from './shared/utils.js';
 import { promoteStorageState } from './runner/session-state.js';
+import { ApiClient } from './api/api-client.js';
+import { reportRunResult } from './reporting/result-reporter.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -26,6 +28,8 @@ async function main() {
     session = await createBatchSession(config, batchId, activeChildren);
     await fs.mkdir(batchDir, { recursive: true });
     const results = await runCasePool(config, batchId, session, activeChildren, control);
+    await stopBrowserSession(session, activeChildren);
+    await finalizeBatchVideos(config, session, results);
     const summary = createSummary({ batchId, batchDir, config, results, startedAt });
     const summaryPath = path.join(batchDir, 'summary.json');
     const reportPath = path.join(batchDir, 'report.html');
@@ -84,6 +88,7 @@ function parseBatchArgs(argv = process.argv.slice(2), env = process.env) {
     storageState: args['storage-state'] || mergedEnv.RUNNER_STORAGE_STATE || mergedEnv.CUECAST_STORAGE_STATE || '',
     workers,
     artifactDir: args['artifact-dir'] || mergedEnv.RUNNER_ARTIFACT_DIR || 'artifacts',
+    ffmpegPath: args['ffmpeg-path'] || mergedEnv.FFMPEG_PATH || 'ffmpeg',
   };
 }
 
@@ -117,6 +122,7 @@ async function runCasePool(config, batchId, session, activeChildren, control) {
 
 async function runOneCase(caseId, caseIndex, config, batchId, session, activeChildren) {
   const startedAt = Date.now();
+  const recordingStartedAt = session?.kind === 'browser' ? session.recordingStartedAt : 0;
   const storageStateInput = session?.kind === 'auth'
     ? await existingStorageState(session.currentPath, config.storageState)
     : config.storageState;
@@ -133,7 +139,8 @@ async function runOneCase(caseId, caseIndex, config, batchId, session, activeChi
     '--headed', String(config.headed),
     '--ignore-https-errors', String(config.ignoreHttpsErrors),
     '--trace', config.trace,
-    '--video', config.video,
+    // 共享 Context 的原生视频由批次宿主统一录制，Runner 只负责执行并返回时间边界。
+    '--video', session?.kind === 'browser' ? 'off' : config.video,
     '--session-mode', config.sessionMode,
     '--artifact-dir', config.artifactDir,
   ];
@@ -168,6 +175,7 @@ async function runOneCase(caseId, caseIndex, config, batchId, session, activeChi
     });
     child.on('close', async (code) => {
       activeChildren.delete(child);
+      const finishedAt = Date.now();
       const artifactDir = parseArtifactDir(stdout);
       const resultPath = artifactDir ? path.join(artifactDir, 'result.json') : '';
       const resultJson = await readJson(resultPath);
@@ -187,7 +195,10 @@ async function runOneCase(caseId, caseIndex, config, batchId, session, activeChi
         status: success ? 'passed' : 'failed',
         success,
         exit_code: code,
-        duration_ms: Date.now() - startedAt,
+        duration_ms: finishedAt - startedAt,
+        started_at_epoch_ms: startedAt,
+        finished_at_epoch_ms: finishedAt,
+        recording_started_at_epoch_ms: recordingStartedAt || null,
         artifact_dir: artifactDir,
         result_json: resultPath,
         error: resultJson?.error || stderr.trim(),
@@ -204,7 +215,15 @@ async function createBatchSession(config, batchId, activeChildren) {
   if (config.sessionMode === 'isolated') return null;
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), `${safePathSegment(batchId)}-`));
   if (config.sessionMode === 'reuse-browser') {
-    const session = { kind: 'browser', directory, endpoint: '', host: null };
+    const session = {
+      kind: 'browser',
+      directory,
+      endpoint: '',
+      host: null,
+      recordingIndex: 0,
+      recordingStartedAt: 0,
+      recordings: [],
+    };
     try {
       await startBrowserSession(session, config, activeChildren);
       return session;
@@ -225,7 +244,9 @@ async function createBatchSession(config, batchId, activeChildren) {
 
 async function startBrowserSession(session, config, activeChildren) {
   const endpointFile = path.join(session.directory, 'endpoint.json');
+  const recordingManifestFile = path.join(session.directory, `recording-${session.recordingIndex + 1}.json`);
   await fs.rm(endpointFile, { force: true }).catch(() => {});
+  await fs.rm(recordingManifestFile, { force: true }).catch(() => {});
   const args = [
     browserSessionHostPath,
     '--endpoint-file', endpointFile,
@@ -233,6 +254,8 @@ async function startBrowserSession(session, config, activeChildren) {
     '--headed', String(config.headed),
     '--ignore-https-errors', String(config.ignoreHttpsErrors),
     '--slow-mo', String(config.slowMo || 0),
+    '--video', config.video,
+    '--recording-manifest-file', recordingManifestFile,
   ];
   const host = spawn(process.execPath, args, {
     cwd: process.cwd(),
@@ -247,7 +270,11 @@ async function startBrowserSession(session, config, activeChildren) {
   host.stderr.on('data', (chunk) => { output += chunk.toString(); });
   host.once('close', () => activeChildren.delete(host));
   try {
-    session.endpoint = await waitForBrowserEndpoint(endpointFile, host, () => output);
+    const endpointInfo = await waitForBrowserEndpoint(endpointFile, host, () => output);
+    session.endpoint = endpointInfo.endpoint;
+    session.recordingStartedAt = endpointInfo.recordingStartedAt;
+    session.recordingManifestFile = recordingManifestFile;
+    session.recordingIndex += 1;
   } catch (error) {
     activeChildren.delete(host);
     if (host.exitCode == null) host.kill();
@@ -263,7 +290,12 @@ async function waitForBrowserEndpoint(endpointFile, host, getOutput) {
       throw new Error(`Browser session host exited before startup: ${getOutput().trim()}`);
     }
     const value = await readJson(endpointFile);
-    if (value?.endpoint) return String(value.endpoint);
+    if (value?.endpoint) {
+      return {
+        endpoint: String(value.endpoint),
+        recordingStartedAt: Number(value.recording_started_at) || Date.now(),
+      };
+    }
     await sleep(50);
   }
   host.kill();
@@ -273,10 +305,14 @@ async function waitForBrowserEndpoint(endpointFile, host, getOutput) {
 async function stopBrowserSession(session, activeChildren) {
   if (session?.kind !== 'browser' || !session.host) return;
   const host = session.host;
+  const manifestFile = session.recordingManifestFile;
   session.host = null;
   session.endpoint = '';
+  session.recordingManifestFile = '';
   activeChildren.delete(host);
-  if (host.exitCode == null) host.kill();
+  if (host.exitCode == null) {
+    try { host.stdin.write('stop\n'); } catch { /* 宿主已退出时走下面的兜底终止。 */ }
+  }
   await new Promise((resolve) => {
     if (host.exitCode != null) return resolve();
     const timer = setTimeout(() => {
@@ -288,6 +324,8 @@ async function stopBrowserSession(session, activeChildren) {
       resolve();
     });
   });
+  const manifest = await readJson(manifestFile);
+  if (manifest?.video_path) session.recordings.push(manifest);
 }
 
 async function existingStorageState(currentPath, initialPath) {
@@ -330,6 +368,106 @@ async function readJson(filePath) {
   } catch {
     return null;
   }
+}
+
+async function finalizeBatchVideos(config, session, results) {
+  if (session?.kind !== 'browser' || !session.recordings?.length || config.video === 'off') return;
+  const api = config.adminApi
+    ? new ApiClient({
+        apiBase: config.apiBase,
+        token: config.token,
+        adminApi: config.adminApi,
+        executionCapability: config.executionCapability,
+      })
+    : null;
+  for (const result of results) {
+    if (!shouldKeepBatchVideo(config.video, result.success) || !result.artifact_dir) continue;
+    const recording = findRecordingForCase(session.recordings, result);
+    if (!recording?.video_path) {
+      appendBatchVideoError(result, '未找到覆盖该用例时间段的批次录制');
+      continue;
+    }
+    const outputPath = path.join(result.artifact_dir, 'video.webm');
+    try {
+      await sliceVideo(recording.video_path, outputPath, result, config.ffmpegPath);
+      const resultJson = await readJson(result.result_json) || {};
+      resultJson.artifacts = { ...(resultJson.artifacts || {}), video: outputPath, videos: [outputPath] };
+      resultJson.raw = {
+        ...(resultJson.raw || {}),
+        batch_video_pending: false,
+        ...(recording.video_size ? { video_capture_size: recording.video_size } : {}),
+        batch_video_source: recording.video_path,
+        batch_video_slice: {
+          started_at_epoch_ms: result.started_at_epoch_ms,
+          finished_at_epoch_ms: result.finished_at_epoch_ms,
+        },
+      };
+      if (api && resultJson.run_id != null) {
+        const uploaded = await api.uploadArtifact(resultJson.run_id, 'video', outputPath);
+        if (uploaded?.url) resultJson.artifacts.video = uploaded.url;
+        if (uploaded?.fileId) {
+          resultJson.artifact_file_ids = { ...(resultJson.artifact_file_ids || {}), video: uploaded.fileId };
+        }
+        await reportRunResult(api, String(resultJson.case_id ?? result.case_id), resultJson);
+      }
+      await writeJson(result.result_json, resultJson);
+      result.artifacts = resultJson.artifacts;
+    } catch (error) {
+      appendBatchVideoError(result, error?.message || String(error));
+    }
+  }
+}
+
+function shouldKeepBatchVideo(video, success) {
+  return video === 'on' || (video === 'retain-on-failure' && !success);
+}
+
+function findRecordingForCase(recordings, result) {
+  const startedAt = Number(result.started_at_epoch_ms);
+  const finishedAt = Number(result.finished_at_epoch_ms);
+  const candidates = recordings
+    .filter((recording) => Number(recording.started_at) <= finishedAt && Number(recording.finished_at) >= startedAt)
+    .sort((left, right) => overlap(right, startedAt, finishedAt) - overlap(left, startedAt, finishedAt));
+  return candidates[0] || null;
+}
+
+function overlap(recording, startedAt, finishedAt) {
+  const start = Math.max(Number(recording.started_at) || 0, startedAt || 0);
+  const end = Math.min(Number(recording.finished_at) || 0, finishedAt || 0);
+  return Math.max(0, end - start);
+}
+
+async function sliceVideo(sourcePath, outputPath, result, ffmpegPath) {
+  const sourceStart = Number(result.recording_started_at_epoch_ms || 0);
+  const startedAt = Number(result.started_at_epoch_ms || 0);
+  const finishedAt = Number(result.finished_at_epoch_ms || 0);
+  const startSeconds = Math.max(0, (startedAt - sourceStart) / 1000 - 0.2);
+  const durationSeconds = Math.max(0.2, (finishedAt - startedAt) / 1000 + 0.4);
+  await fs.mkdir(path.dirname(outputPath), { recursive: true });
+  await runFfmpeg(ffmpegPath, [
+    '-hide_banner', '-loglevel', 'error', '-y',
+    '-ss', startSeconds.toFixed(3), '-i', sourcePath,
+    '-t', durationSeconds.toFixed(3), '-map', '0:v:0', '-an',
+    '-c', 'copy', '-avoid_negative_ts', 'make_zero', outputPath,
+  ]);
+}
+
+function runFfmpeg(ffmpegPath, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(ffmpegPath || 'ffmpeg', args, { windowsHide: true });
+    let stderr = '';
+    child.stderr?.on('data', (chunk) => { stderr += chunk.toString(); });
+    child.once('error', (error) => reject(new Error(`批次视频切片需要 ffmpeg：${error.message}`)));
+    child.once('close', (code) => {
+      if (code === 0) return resolve();
+      reject(new Error(`ffmpeg 视频切片失败（退出码=${code}）：${stderr.trim()}`));
+    });
+  });
+}
+
+function appendBatchVideoError(result, message) {
+  result.video_error = message;
+  result.error = `${result.error ? `${result.error}；` : ''}批次视频切片失败：${message}`;
 }
 
 function createSummary({ batchId, batchDir, config, results, startedAt }) {
