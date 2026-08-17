@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import test from 'node:test';
+import { CANDIDATE_TYPES } from '../../src/runner/locator-resolver.js';
 import { resolvePageErrorCheckEnabled } from '../../src/runner/page-state-diagnostics.js';
 import {
   chooseHighConfidenceCandidate,
@@ -8,29 +10,23 @@ import {
 } from '../../src/runner/semantic-locator-resolver.js';
 import { parseArgs } from '../../src/shared/utils.js';
 
+const locatorContract = JSON.parse(fs.readFileSync(new URL(
+  '../../../sakura-cuecast/tests/fixtures/locator-contract-v1.json',
+  import.meta.url,
+), 'utf8'));
+
 test('semantic-v1 supports every locator type emitted by the recorder', () => {
-  const recordedTypes = [
-    'css_attr_data-testid',
-    'css_attr_data-test',
-    'css_attr_name',
-    'css_attr_aria-label',
-    'css_attr_placeholder',
-    'css_attr_title',
-    'css_attr_role',
-    'css_id',
-    'css_fallback',
-    'xpath_fallback',
-    'component_root_class',
-    'component_root_combo',
-    'component_root_sibling',
-    'table_cell_css',
-    'table_cell_xpath',
-    'tree_interaction',
-    'tree_node_text',
-    'text_exact',
-    'text_exact_tag',
-  ];
+  const recordedTypes = locatorContract.recorder_candidate_types;
   assert.deepEqual(recordedTypes.filter((type) => !SEMANTIC_CANDIDATE_TYPES.has(type)), []);
+  assert.deepEqual(recordedTypes.filter((type) => !CANDIDATE_TYPES.has(type)), []);
+});
+
+test('shared locator fixture is supported by both Playwright resolver modes', () => {
+  const fixtureTypes = locatorContract.candidates.map((candidate) => candidate.type);
+
+  assert.deepEqual(fixtureTypes.filter((type) => !SEMANTIC_CANDIDATE_TYPES.has(type)), []);
+  assert.deepEqual(fixtureTypes.filter((type) => !CANDIDATE_TYPES.has(type)), []);
+  assert.equal(locatorContract.candidates.find((candidate) => candidate.type === 'xpath_fallback').value, "(//span[@class='user-title'])[1]");
 });
 
 test('semantic scoring treats exact recorded context as a strong signal', () => {

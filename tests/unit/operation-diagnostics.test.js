@@ -69,7 +69,7 @@ test('所有目录 form_schema 字段都进入 Playwright 执行详情', () => {
       fieldCount += method.form_schema.length;
     }
   }
-  assert.equal(fieldCount, 117);
+  assert.equal(fieldCount, 125);
 });
 
 test('统一执行详情同时保留配置值和变量解析后的安全值', () => {
@@ -134,21 +134,48 @@ test('优先使用 Admin 下发的目录字段元数据生成参数详情', () =
   assert.equal(operation.outcome.facts[0].label, '返回类型');
 });
 
-test('操作详情把 CueCast 双花括号识别为变量引用', () => {
+test('Playwright 变量断言区分配置值、解析后的期望值和页面实际值', () => {
   const operation = buildOperationDiagnostic(
     {
       method_code: 'assertion.element.match',
       action_type: 'assert_element_match',
-      expect: '{{account.username}}',
+      expect: '{{test}}1',
     },
-    { action_type: 'assert_element_match', expect: 'sysadmin' },
-    { action_type: 'assert_element_match', status: 'passed' },
+    { action_type: 'assert_element_match', expect: '防统方系统 - 系统管理平台1' },
+    {
+      action_type: 'assert_element_match',
+      status: 'failed',
+      operation_assertion: {
+        subject: '指定元素',
+        operator: 'contains',
+        expected: { value_state: 'visible', preview: '防统方系统 - 系统管理平台1' },
+        actual: { value_state: 'visible', preview: '防统方系统 - 系统管理平台' },
+        passed: false,
+      },
+    },
   );
 
-  assert.deepEqual(operation.inputs.find((item) => item.key === 'expect').source, {
+  const expectedInput = operation.inputs.find((item) => item.key === 'expect');
+  assert.equal(expectedInput.configured.preview, '{{test}}1');
+  assert.equal(expectedInput.effective.preview, '防统方系统 - 系统管理平台1');
+  assert.deepEqual(expectedInput.actual, { value_state: 'visible', preview: '防统方系统 - 系统管理平台' });
+  assert.deepEqual(expectedInput.source, {
     code: 'variable_reference',
-    label: '引用变量：account.username',
+    label: '引用变量：test',
   });
+});
+
+test('Playwright 操作输入保留超过 512 字符的完整配置值和执行值', () => {
+  const longValue = `locator-${'x'.repeat(700)}`;
+  const operation = buildOperationDiagnostic(
+    { action_type: 'click', target_ref: longValue },
+    { action_type: 'click', target_ref: longValue },
+    { action_type: 'click', status: 'passed' },
+  );
+  const target = operation.inputs.find((item) => item.key === 'target_ref');
+
+  assert.equal(target.configured.preview, longValue);
+  assert.equal(target.effective.preview, longValue);
 });
 
 test('统一执行详情不回显敏感值和受限脚本命令', () => {
@@ -247,6 +274,37 @@ test('统一执行详情叠加到现有 typed facets 而不覆盖基础设施结
   assert.equal(result.details.operation.profile, 'infrastructure');
 });
 
+test('证书角色显示具体文件名并保留上传交互结果', () => {
+  const certificateReference = {
+    type: 'admin_execution_file',
+    asset_id: 123,
+    file_name: '172_19_5_45_audit.lic',
+    download_path: '/automation/playwright/testcases/SCENE/CASE/execution-file',
+  };
+  const operation = buildOperationDiagnostic(
+    { action_type: 'certificate_upload', certificate_ref: certificateReference },
+    { action_type: 'certificate_upload', certificate_ref: certificateReference },
+    {
+      action_type: 'certificate_upload',
+      status: 'passed',
+      filename: '172_19_5_45_audit.lic',
+      file_count: 1,
+      upload_status: '上传控件已设置',
+      certificate_uploaded: true,
+      uploaded_certificate_files: ['172_19_5_45_audit.lic'],
+    },
+  );
+
+  const certificateInput = operation.inputs.find((item) => item.key === 'certificate_ref');
+  assert.equal(certificateInput.configured.preview, '172_19_5_45_audit.lic');
+  assert.equal(certificateInput.effective.preview, '172_19_5_45_audit.lic');
+  assert.deepEqual(
+    operation.outcome.facts.map((item) => item.key),
+    ['filename', 'file_count', 'upload_status', 'certificate_uploaded', 'uploaded_certificate_files'],
+  );
+  assert.equal(operation.outcome.facts.find((item) => item.key === 'certificate_uploaded').value.preview, '成功');
+});
+
 test('断言详情保留期望值、实际值和判定结果', () => {
   const operation = buildOperationDiagnostic(
     { method_code: 'assertion.text', action_type: 'assert_text', target_ref: 'css=.message', expect: '提交成功' },
@@ -268,6 +326,8 @@ test('断言详情保留期望值、实际值和判定结果', () => {
   assert.equal(operation.outcome.assertion.expected.preview, '提交成功');
   assert.equal(operation.outcome.assertion.actual.preview, '提交成功，正在跳转');
   assert.equal(operation.outcome.assertion.passed, true);
+  const expectedInput = operation.inputs.find((item) => item.key === 'expect');
+  assert.deepEqual(expectedInput.actual, { value_state: 'visible', preview: '提交成功，正在跳转' });
 });
 
 test('断言失败时从错误详情保留安全实际值而不伪造成功', () => {
@@ -284,4 +344,48 @@ test('断言失败时从错误详情保留安全实际值而不伪造成功', ()
   assert.equal(operation.outcome.assertion.expected.preview, '提交成功');
   assert.equal(operation.outcome.assertion.actual.preview, '系统错误');
   assert.equal(operation.outcome.assertion.passed, false);
+});
+
+test('下载 MIME 断言失败时将执行器详情映射为实际值', () => {
+  const operation = buildOperationDiagnostic(
+    { action_type: 'assert_download', value: '{"filename":"clientInfoFile","mime":"multipart/form-data1"}' },
+    { action_type: 'assert_download', value: '{"filename":"clientInfoFile","mime":"multipart/form-data1"}' },
+    {
+      action_type: 'assert_download',
+      status: 'failed',
+      details: {
+        expected_mime: 'multipart/form-data1',
+        actual_mime: 'multipart/form-data',
+        filename: 'clientInfoFile47628A57FE84D04A.info',
+      },
+    },
+  );
+
+  assert.equal(operation.outcome.assertion.subject, '下载文件 MIME');
+  assert.equal(operation.outcome.assertion.operator, 'contains');
+  assert.equal(operation.outcome.assertion.expected.preview, 'multipart/form-data1');
+  assert.equal(operation.outcome.assertion.actual.preview, 'multipart/form-data');
+  assert.equal(operation.outcome.assertion.passed, false);
+});
+
+test('下载断言通过时返回安全下载事实和实际值摘要', () => {
+  const operation = buildOperationDiagnostic(
+    { action_type: 'assert_download', value: '{"filename":"clientInfoFile","min_bytes":46}' },
+    { action_type: 'assert_download', value: '{"filename":"clientInfoFile","min_bytes":46}' },
+    {
+      action_type: 'assert_download',
+      status: 'passed',
+      downloaded_filename: 'clientInfoFile47628A57FE84D04A.info',
+      downloaded_mime: 'multipart/form-data',
+      downloaded_bytes: 46,
+      downloaded_sha256: 'abc123',
+    },
+  );
+
+  assert.match(operation.outcome.assertion.actual.preview, /"mime":"multipart\/form-data"/);
+  assert.deepEqual(
+    operation.outcome.facts.map((fact) => fact.key),
+    ['downloaded_filename', 'downloaded_mime', 'downloaded_bytes', 'downloaded_sha256'],
+  );
+  assert.equal(operation.outcome.assertion.passed, true);
 });

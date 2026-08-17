@@ -259,7 +259,8 @@ npm run run:batch -- --case-ids 278,279 --api-base http://127.0.0.1:4173/api --w
 - `reuse-auth` 会记录上一条成功用例的最终同源业务页；下一条录制起点仍是 `/login`、`/login1`、`/signin` 等登录路由时，优先恢复该业务页，避免加载状态后又被固定起点覆盖回登录页面。
 - `reuse-auth` 必须带批次标识且强制 `--workers 1`；失败或取消用例不覆盖上一份成功状态，批次退出时删除临时状态目录。
 - `--session-mode reuse-browser` 由批次宿主持有同一个 Browser、Context 和当前页面，各用例 Runner 进程仅连接和断开；成功用例结束后，下一条用例从当前同源业务页继续执行，不重新打开登录页或浏览器窗口。
-- `reuse-browser` 强制 `--workers 1`。`--video on|off|retain-on-failure` 均可用：Runner 在共享页面上按用例启动和停止 screencast，分别生成 WebM，不关闭共享窗口；Trace、失败截图和结果也仍按用例生成。失败、取消或批次结束会销毁共享浏览器，避免把不确定页面状态传给后续用例。
+- `reuse-browser` 强制 `--workers 1`。`--video on|off|retain-on-failure` 均可用：宿主在共享 Context 上生成一段批次级原生 WebM，批次结束后按每条用例的实际执行时间切片到各自 artifact 目录；Trace、失败截图和结果仍按用例生成。失败、取消或批次结束会销毁共享浏览器，避免把不确定页面状态传给后续用例。
+- `isolated` 和 `reuse-auth` 的有头 Chromium 保持真实窗口 viewport，并单独固定原生视频输出尺寸，避免默认 `800x600` 画布产生灰色空白或驱动窗口抖动；`reuse-browser` 使用批次级原生录制，不再使用页面 screencast。批量切片需要运行环境可执行 `ffmpeg`。
 - `--storage-state`/`RUNNER_STORAGE_STATE`/`CUECAST_STORAGE_STATE` 可作为单用例只读初始状态；批次候选输出路径只应由平台后端传入。
 - 每个 case 仍复用单用例 Runner 流程；admin 批次会独立生成 `playwright-runner-artifacts/runs/<projectShortName>/<versionName>/<sceneId>/<caseId>/<yyyyMMdd>/<executionId>/`。
 - 批量汇总生成在 `playwright-runner-artifacts/batches/<batchId>/`。
@@ -849,7 +850,7 @@ RUNNER_LOCATOR_MODE    legacy | semantic-v1，默认 legacy
 RUNNER_PAGE_ERROR_CHECK_ENABLED 留空继承用例，true | false 为任务级覆盖
 RUNNER_HEADED          true | false，默认 false
 RUNNER_TRACE           on | off | retain-on-failure，批量默认 retain-on-failure
-RUNNER_VIDEO           on | off | retain-on-failure；reuse-browser 同样按用例生成录屏
+RUNNER_VIDEO           on | off | retain-on-failure；reuse-browser 按批次录制后切片
 RUNNER_ARTIFACT_DIR    产物根目录，默认 playwright-runner-artifacts
 RUNNER_STEP_TIMEOUT_MS 单步超时
 RUNNER_CASE_TIMEOUT_MS 单 case 超时
@@ -862,12 +863,17 @@ RUNNER_FINISH_DELAY_MS 执行结束后关闭浏览器前停留毫秒数
 当 `CUECAST_ADMIN_API=true` 时，单用例执行结束后会把以下本地产物逐项上传到 admin：
 
 - `report`：HTML 执行报告。
+- `result`：`result.json` 执行结果快照。
 - `console`：浏览器 console、pageerror 和 requestfailed 事件。
+- `execution-log`：平台执行日志。
 - `video`：按 `RUNNER_VIDEO` 保留策略生成的视频。
 - `trace`：按 `RUNNER_TRACE` 保留策略生成的 Playwright trace。
 - `screenshot`：失败截图。
+- `download`：`assert_download` 保存并校验过的下载文件。
+- `response`：响应正文和元数据快照。
+- `dom`：失败页面 HTML 和正文快照。
 
-上传使用当前 `CUECAST_TOKEN` 调用 `POST /automation/playwright/artifacts`。结果回传中的 `artifacts` 只保存 admin 返回的鉴权 URL，不包含 Runner 节点绝对路径。单个产物上传失败会记录在 `artifact_upload_errors` 中，但不会覆盖用例本身的通过或失败结果。
+上传使用当前 `CUECAST_TOKEN` 调用 `POST /automation/playwright/artifacts`。非空产物在 admin 存储中保留相对于本次执行目录的逻辑路径，例如 `logs/console.json` 和 `downloads/<原文件名>`；空目录以及包含登录态的 `browser-profile` 不上传。结果回传中的 `artifacts` 和步骤产物字段只保存 admin 返回的鉴权 URL，不包含 Runner 节点绝对路径。单个产物上传失败会记录在 `artifact_upload_errors` 中，并使 `artifact_delivery.upload_completed=false`，但不会覆盖用例本身的通过或失败结果。
 
 admin 默认允许单文件 200MB；视频超过限制时应缩短用例、改用 `retain-on-failure`，或按部署要求调整服务端上传限制。
 

@@ -143,13 +143,14 @@ export class ApiClient {
     return res.data;
   }
 
-  async uploadArtifact(runId, artifactType, filePath) {
+  async uploadArtifact(runId, artifactType, filePath, relativePath = '') {
     if (!this.adminApi) return null;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), Math.max(this.timeoutMs, 120000));
     const form = new FormData();
     form.append('runId', runId);
     form.append('artifactType', artifactType);
+    if (relativePath) form.append('relativePath', relativePath);
     form.append('file', await fs.openAsBlob(filePath), path.basename(filePath));
     const headers = {};
     if (this.token) {

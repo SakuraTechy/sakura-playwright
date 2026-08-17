@@ -61,6 +61,7 @@ import {
 const browserTypes = { chromium, firefox, webkit };
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const focusExtensionPath = path.resolve(__dirname, '..', 'tools', 'focus-extension');
+const DEFAULT_HEADED_VIDEO_VIEWPORT = Object.freeze({ width: 1920, height: 991 });
 
 async function main() {
   const config = parseArgs();
@@ -86,7 +87,10 @@ async function main() {
   let context;
   let page;
   let activePage;
-  let sharedScreencastPage;
+  let screencastPage;
+  let useScreencastVideo = false;
+  const batchNativeVideo = config.sessionMode === 'reuse-browser'
+    && Boolean(process.env.SAKURA_PLAYWRIGHT_BROWSER_SESSION_DIR);
   let liveFramePublisher;
   let actionPreviewWarningReported = false;
   const browserActionContext = createBrowserActionContext({ defaultTimeoutMs: config.timeoutMs });
@@ -144,8 +148,19 @@ async function main() {
       launchArgs.push('--start-maximized');
     }
     const viewport = resolveViewport(testCase, { headed: config.headed });
+    const nativeVideoSize = resolveNativeVideoSize(testCase, viewport, config, sharedBrowserSession);
     const liveFramePreset = resolveLiveFrameQualityPreset(config.liveFrameQuality);
     const liveFrameDeviceScaleFactor = viewport ? liveFramePreset.deviceScaleFactor : 1;
+    // 共享 Context 的视频必须由宿主录制整批视频，Runner 只写用例时间边界供终态切片。
+    // 禁止回退到已验证会缩小页面的 CDP screencast，旧宿主需升级后才能启用视频。
+    useScreencastVideo = false;
+    if (sharedBrowserSession && shouldRecordVideo(config.video) && !batchNativeVideo) {
+      throw new RunnerError(
+        'BROWSER_SESSION_VIDEO_UNSUPPORTED',
+        'reuse-browser 的录屏需要批次原生录制宿主，请同步升级 browser-session-host 和 Admin 服务',
+      );
+    }
+    if (batchNativeVideo) result.raw.batch_video_pending = true;
     const storageStateBundle = await loadStorageStateBundle(config.storageState);
     const storageState = storageStateBundle.storageState;
     const reusableSessionStorage = config.sessionMode === 'reuse-auth'
@@ -179,8 +194,17 @@ async function main() {
       ...(storageState ? { storageState } : {}),
       // 内部测试环境可能使用自签名证书；由平台任务显式传入时才跳过浏览器证书校验。
       ignoreHTTPSErrors: config.ignoreHttpsErrors,
-      recordVideo: shouldRecordVideo(config.video) ? { dir: artifacts.runDir } : undefined,
+      recordVideo: shouldRecordVideo(config.video) && !useScreencastVideo
+        ? {
+            dir: artifacts.runDir,
+            ...(nativeVideoSize ? { size: nativeVideoSize } : {}),
+          }
+        : undefined,
     };
+    if (nativeVideoSize) {
+      result.raw.video_capture_size = nativeVideoSize;
+      executionLogger.info('video', `原生录屏尺寸=${formatViewport(nativeVideoSize)}`, true);
+    }
 
     executionLogger.info('browser', '正在初始化 Playwright 浏览器');
 
@@ -225,13 +249,28 @@ async function main() {
     }
     const openPages = context.pages().filter((candidate) => !candidate.isClosed());
     page = (sharedBrowserSession ? openPages.at(-1) : openPages[0]) || await context.newPage();
+    if (config.headed) {
+      // 必须在启动 screencast 前激活页面；之后切到前台会重建 Chromium 合成表面，导致录屏仍引用旧的小尺寸表面。
+      await page.bringToFront().catch(() => {});
+      await waitForPageLayout(page);
+      console.log('[runner] headed page ready');
+    }
     if (sharedBrowserSession && viewport) {
       await page.setViewportSize(viewport);
     }
-    if (sharedBrowserSession && shouldRecordVideo(config.video)) {
-      // 共享页面不能通过关闭 Context 来分割原生录像；Screencast 可按用例启停且不破坏页面状态。
-      await page.screencast.start({ path: artifacts.videoPath });
-      sharedScreencastPage = page;
+    if (useScreencastVideo) {
+      // 先同步页面 viewport，再启动 screencast；只设置视频尺寸而不同步页面会把业务页缩在左上角。
+      const screencastSize = await resolveScreencastSize(page);
+      if (!viewport && screencastSize) {
+        await page.setViewportSize(screencastSize);
+      }
+      result.raw.video_capture_size = screencastSize || null;
+      executionLogger.info('video', `录屏尺寸=${formatViewport(screencastSize)}`, true);
+      await page.screencast.start({
+        path: artifacts.videoPath,
+        ...(screencastSize ? { size: screencastSize } : {}),
+      });
+      screencastPage = page;
     }
     attachPageDiagnostics(page, consoleEvents);
     attachNetworkRecorder(page, networkEvents);
@@ -243,10 +282,6 @@ async function main() {
         'live',
         `实时画面已启用，档位=${config.liveFrameQuality}，JPEG=${liveFramePreset.jpegQuality}，像素倍率=${liveFrameDeviceScaleFactor}，间隔=${liveFramePreset.intervalMs}ms`,
       );
-    }
-    if (config.headed) {
-      await page.bringToFront().catch(() => {});
-      console.log('[runner] headed page ready');
     }
     const sessionStart = sharedBrowserSession
       ? resolveSharedBrowserStart(testCase.start_url, page.url())
@@ -429,9 +464,9 @@ async function main() {
       onTimeout: async () => {
         caseTimedOut = true;
         await infrastructureTasks.cancelActive('case_timeout');
-        if (sharedScreencastPage) {
-          await sharedScreencastPage.screencast.stop().catch(() => {});
-          sharedScreencastPage = undefined;
+        if (screencastPage) {
+          await screencastPage.screencast.stop().catch(() => {});
+          screencastPage = undefined;
         }
         await closeBrowserResources(browser, context, sharedBrowserSession);
       },
@@ -488,18 +523,22 @@ async function main() {
       await context.tracing.stop(keepTrace ? { path: artifacts.tracePath } : {}).catch(() => {});
       if (keepTrace) result.artifacts.trace = artifacts.tracePath;
     }
-    if (sharedBrowserSession) {
-      if (sharedScreencastPage) {
-        await sharedScreencastPage.screencast.stop().catch((error) => {
+    if (useScreencastVideo) {
+      if (screencastPage) {
+        await screencastPage.screencast.stop().catch((error) => {
           result.artifacts.video_error = error?.message || String(error);
         });
       }
       await collectScreencastArtifact(artifacts.videoPath, result, shouldKeepArtifact(config.video, result.success));
+    }
+    if (sharedBrowserSession) {
       // 远程 Browser.close 只断开当前 Runner；Context 和页面仍由批次宿主持有。
       if (browser) await browser.close().catch(() => {});
     } else {
       if (context) await context.close().catch(() => {});
-      await collectVideoArtifact(activePage || page, result, shouldKeepArtifact(config.video, result.success)).catch(() => {});
+      if (!useScreencastVideo) {
+        await collectVideoArtifact(activePage || page, result, shouldKeepArtifact(config.video, result.success)).catch(() => {});
+      }
       if (browser) await browser.close().catch(() => {});
     }
     finalizeRunResult(result, startedAt);
@@ -585,6 +624,7 @@ async function main() {
       result_reported: resultReported,
     };
     await writeJson(artifacts.resultPath, result);
+    await writeSharedBatchVideoManifest(config, result, artifacts, startedAt);
     await cleanupLocalRunArtifacts(config).catch((error) => {
       console.warn('[runner] failed to clean local artifacts:', error?.message || error);
     });
@@ -594,6 +634,31 @@ async function main() {
   if (!result.success) {
     process.exitCode = 1;
   }
+}
+
+async function writeSharedBatchVideoManifest(config, result, artifacts, startedAt) {
+  if (config.sessionMode !== 'reuse-browser'
+    || !process.env.SAKURA_PLAYWRIGHT_BROWSER_SESSION_DIR
+    || !shouldRecordVideo(config.video)) return;
+  const sessionDirectory = path.resolve(process.env.SAKURA_PLAYWRIGHT_BROWSER_SESSION_DIR);
+  const casesDirectory = path.join(sessionDirectory, 'cases');
+  const finishedAt = Date.now();
+  const fileName = `${safeFileSegment(result.case_id)}-${safeFileSegment(result.run_id || finishedAt)}.json`;
+  await fs.mkdir(casesDirectory, { recursive: true });
+  await writeJson(path.join(casesDirectory, fileName), {
+    case_id: result.case_id,
+    run_id: result.run_id,
+    result_json: artifacts.resultPath,
+    artifact_dir: artifacts.runDir,
+    success: result.success,
+    video_policy: config.video,
+    started_at: startedAt,
+    finished_at: finishedAt,
+  });
+}
+
+function safeFileSegment(value) {
+  return String(value || 'item').replace(/[^A-Za-z0-9._-]/g, '_');
 }
 
 function shouldStartTrace(mode) {
@@ -609,6 +674,23 @@ function shouldUseFocusExtension(config) {
   return config.headed && config.browser === 'chromium' && !config.storageState;
 }
 
+function resolveNativeVideoSize(testCase, viewport, config, sharedBrowserSession) {
+  if (viewport || sharedBrowserSession || !shouldRecordVideo(config.video)
+    || !config.headed || config.browser !== 'chromium') {
+    return null;
+  }
+  const recordedViewport = {
+    width: Number(testCase.viewport_width),
+    height: Number(testCase.viewport_height),
+  };
+  // 最大化窗口保留 viewport=null，避免驱动可见窗口反复 resize；只固定原生视频输出尺寸。
+  if (isValidScreencastSize(recordedViewport)
+    && recordedViewport.width >= 1280 && recordedViewport.height >= 720) {
+    return normalizeScreencastSize(recordedViewport);
+  }
+  return { ...DEFAULT_HEADED_VIDEO_VIEWPORT };
+}
+
 async function closeBrowserResources(browser, context, sharedBrowserSession) {
   if (sharedBrowserSession) {
     if (browser) await browser.close().catch(() => {});
@@ -616,6 +698,35 @@ async function closeBrowserResources(browser, context, sharedBrowserSession) {
   }
   if (context) await context.close().catch(() => {});
   if (browser) await browser.close().catch(() => {});
+}
+
+async function resolveScreencastSize(page) {
+  const windowSize = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight })).catch(() => null);
+  if (isValidScreencastSize(windowSize)) return normalizeScreencastSize(windowSize);
+  const viewport = page.viewportSize();
+  return isValidScreencastSize(viewport) ? normalizeScreencastSize(viewport) : undefined;
+}
+
+async function waitForPageLayout(page) {
+  // 连续两个动画帧确保 bringToFront 后的浏览器窗口尺寸已提交到渲染进程。
+  await page.evaluate(() => new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  })).catch(() => {});
+}
+
+function isValidScreencastSize(size) {
+  return size
+    && Number.isFinite(Number(size.width))
+    && Number.isFinite(Number(size.height))
+    && Number(size.width) > 0
+    && Number(size.height) > 0;
+}
+
+function normalizeScreencastSize(size) {
+  return {
+    width: Math.max(1, Math.floor(Number(size.width))),
+    height: Math.max(1, Math.floor(Number(size.height))),
+  };
 }
 
 function shouldKeepArtifact(mode, success) {

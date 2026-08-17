@@ -9,6 +9,8 @@ import {
 export const SEMANTIC_CANDIDATE_TYPES = new Set([
   'css_attr_data-testid',
   'css_attr_data-test',
+  'css_attr_data-qa',
+  'css_attr_data-cy',
   'css_attr_name',
   'css_attr_aria-label',
   'css_attr_placeholder',
@@ -40,6 +42,7 @@ const POINTER_ACTIONS = new Set([
   'assert_request',
   'assert_response',
 ]);
+const FILE_UPLOAD_ACTIONS = new Set(['file_upload', 'certificate_upload']);
 const DISABLED_SENSITIVE_ACTIONS = new Set([
   'click',
   'click_open_page',
@@ -50,6 +53,7 @@ const DISABLED_SENSITIVE_ACTIONS = new Set([
   'assert_response',
   'input',
   'file_upload',
+  'certificate_upload',
   'key',
 ]);
 const POLL_INTERVAL_MS = 120;
@@ -321,14 +325,16 @@ async function tryDescriptor(page, step, descriptor, options, context) {
   try {
     locator = createDescriptorLocator(descriptor);
   } catch (error) {
-    return failedAttempt(descriptor, 'LOCATOR_LOOKUP_ERROR', 'lookup_error', { lookupError: error?.message || String(error) });
+    const code = classifyLookupError(descriptor, error);
+    return failedAttempt(descriptor, code, 'lookup_error', { lookupError: error?.message || String(error) });
   }
 
   let matchedCount;
   try {
     matchedCount = await locator.count();
   } catch (error) {
-    return failedAttempt(descriptor, 'LOCATOR_LOOKUP_ERROR', 'lookup_error', { lookupError: error?.message || String(error) });
+    const code = classifyLookupError(descriptor, error);
+    return failedAttempt(descriptor, code, 'lookup_error', { lookupError: error?.message || String(error) });
   }
   if (matchedCount < 1) return failedAttempt(descriptor, 'LOCATOR_NOT_FOUND', 'not_found', { matchedCount: 0 });
 
@@ -339,7 +345,7 @@ async function tryDescriptor(page, step, descriptor, options, context) {
     const normalized = await normalizeActionTarget(descriptor.root, originalLocator, step.action_type);
     const renderedVisible = await normalized.locator.isVisible({ timeout: 0 }).catch(() => false);
     // Playwright 的 setInputFiles 允许操作隐藏 file input，其余动作仍要求可见目标。
-    const visible = String(step.action_type || '').toLowerCase() === 'file_upload' ? true : renderedVisible;
+    const visible = FILE_UPLOAD_ACTIONS.has(String(step.action_type || '').toLowerCase()) ? true : renderedVisible;
     const disabledInfo = DISABLED_SENSITIVE_ACTIONS.has(String(step.action_type || '').toLowerCase())
       ? await readDisabledInfo(normalized.locator)
       : { disabled: false, reason: '', by: '' };
@@ -425,6 +431,15 @@ function createDescriptorLocator(descriptor) {
   }
   if (type === 'xpath_fallback' || type === 'table_cell_xpath') return root.locator(`xpath=${value}`);
   return root.locator(value);
+}
+
+function classifyLookupError(descriptor, error) {
+  if (!['xpath_fallback', 'table_cell_xpath'].includes(String(descriptor?.type || ''))) {
+    return 'LOCATOR_LOOKUP_ERROR';
+  }
+  const message = String(error?.message || error || '');
+  if (/not a node set|does not resolve to a node|non-node/i.test(message)) return 'LOCATOR_XPATH_UNSUPPORTED';
+  return 'LOCATOR_XPATH_INVALID';
 }
 
 function createTreeNodeLocator(root, rawValue, candidateContext) {
@@ -627,7 +642,21 @@ async function readElementSnapshot(locator) {
       const section = row.closest('tbody,thead');
       if (section) rowIndex = Array.from(section.querySelectorAll(':scope > tr')).indexOf(row);
     }
-    const overlay = element.closest?.('[role="dialog"],[role="alertdialog"],dialog,.ant-modal,.ant-modal-wrap,.el-dialog,.el-overlay,.el-popper,.ant-select-dropdown,.ivu-select-dropdown,.n-modal,[data-overlay="true"]');
+    let overlay = element.closest?.('[role="dialog"],[role="alertdialog"],dialog,.ant-modal,.ant-modal-wrap,.el-dialog,.el-overlay,.el-popper,.el-message,.ivu-select-dropdown,.ivu-message-notice,.ant-select-dropdown,.ant-message-notice,.n-modal,.n-message,[data-overlay="true"]');
+    if (!overlay) {
+      // Element UI Message 等通知直接挂在 body 且使用 fixed/absolute，录制端也按此规则标记浮层。
+      let current = element;
+      while (current && current !== document.body) {
+        if (current.parentElement === document.body) {
+          const style = window.getComputedStyle(current);
+          if (['fixed', 'absolute'].includes(style.position)) {
+            overlay = current;
+            break;
+          }
+        }
+        current = current.parentElement;
+      }
+    }
     let overlayZ = 0;
     let current = overlay;
     while (current && current !== document.documentElement) {
@@ -819,6 +848,8 @@ function preferFailure(current, next) {
   if (!next) return current;
   if (!current) return next;
   const priority = {
+    LOCATOR_XPATH_INVALID: 7,
+    LOCATOR_XPATH_UNSUPPORTED: 6,
     LOCATOR_DISABLED: 5,
     LOCATOR_AMBIGUOUS: 4,
     LOCATOR_HIDDEN: 3,
@@ -829,6 +860,8 @@ function preferFailure(current, next) {
 }
 
 function failureMessage(code) {
+  if (code === 'LOCATOR_XPATH_INVALID') return 'XPath 语法无效，浏览器无法解析';
+  if (code === 'LOCATOR_XPATH_UNSUPPORTED') return 'XPath 返回非节点结果，请改用 XPath 1.0 节点表达式';
   if (code === 'LOCATOR_DISABLED') return '目标元素在等待超时后仍处于禁用状态';
   if (code === 'LOCATOR_AMBIGUOUS') return '定位命中多个元素，且没有满足阈值的高置信目标';
   if (code === 'LOCATOR_HIDDEN') return '已找到元素，但没有可见或可操作的目标';

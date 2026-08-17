@@ -44,7 +44,11 @@ export function normalizeSteps(rawSteps, startStep = 0) {
     })
     .sort((a, b) => a.step_index - b.step_index);
 
-  return ensureUniqueStepIds(steps).filter((_, index) => index >= startStep);
+  // startStep 指向场景定义中的原始步骤序号；先截取再过滤，避免前置禁用步骤造成部分执行错位。
+  // Admin 正常会先过滤禁用步骤，Runner 仍保留最终闸门以兼容旧接口。
+  return ensureUniqueStepIds(steps)
+    .filter((step) => step.step_index >= startStep)
+    .filter(isEnabledStep);
 }
 
 function ensureUniqueStepIds(steps) {
@@ -74,6 +78,13 @@ function ensureUniqueStepIds(steps) {
 
 function stepIdKey(value) {
   return String(value);
+}
+
+function isEnabledStep(step) {
+  const status = step?.status;
+  if (status == null || status === '') return true;
+  const normalized = String(status).trim().toLowerCase();
+  return !['2', 'false', 'disable', 'disabled', '禁用'].includes(normalized);
 }
 
 export function resolveViewport(testCase, options = {}) {

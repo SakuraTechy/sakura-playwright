@@ -362,7 +362,9 @@ export async function runStep(page, testCase, step, options = {}) {
     case 'assert_text': {
       locatorInfo = hasLocator(step) ? await resolveStepLocator(page, step, options) : null;
       await showStepAction(page, step, locatorInfo?.locator || null, options);
-      const assertionResult = await runAssertText(page, step, options, locatorInfo);
+      const assertionResult = locatorInfo
+        ? await runLocatorAction(page, locatorInfo, options, () => runAssertText(page, step, options, locatorInfo))
+        : await runAssertText(page, step, options, locatorInfo);
       locatorInfo = assertionResult.locatorInfo;
       operationAssertion = assertionResult.assertion;
       break;
@@ -371,7 +373,9 @@ export async function runStep(page, testCase, step, options = {}) {
     case 'assert_text_not': {
       locatorInfo = hasLocator(step) ? await resolveStepLocator(page, step, options) : null;
       await showStepAction(page, step, locatorInfo?.locator || null, options);
-      const assertionResult = await runAssertTextNot(page, step, options, locatorInfo);
+      const assertionResult = locatorInfo
+        ? await runLocatorAction(page, locatorInfo, options, () => runAssertTextNot(page, step, options, locatorInfo))
+        : await runAssertTextNot(page, step, options, locatorInfo);
       locatorInfo = assertionResult.locatorInfo;
       operationAssertion = assertionResult.assertion;
       break;
@@ -380,7 +384,12 @@ export async function runStep(page, testCase, step, options = {}) {
     case 'assert_attribute': {
       locatorInfo = await resolveStepLocator(page, step, options);
       await showStepAction(page, step, locatorInfo.locator, options);
-      operationAssertion = await assertAttribute(locatorInfo.locator, step, options);
+      operationAssertion = await runLocatorAction(
+        page,
+        locatorInfo,
+        options,
+        () => assertAttribute(locatorInfo.locator, step, options),
+      );
       break;
     }
 
@@ -396,7 +405,9 @@ export async function runStep(page, testCase, step, options = {}) {
     case 'assert_text_regex': {
       locatorInfo = hasLocator(step) ? await resolveStepLocator(page, step, options) : null;
       await showStepAction(page, step, locatorInfo?.locator || null, options);
-      const assertionResult = await runAssertTextRegex(page, step, options, locatorInfo);
+      const assertionResult = locatorInfo
+        ? await runLocatorAction(page, locatorInfo, options, () => runAssertTextRegex(page, step, options, locatorInfo))
+        : await runAssertTextRegex(page, step, options, locatorInfo);
       locatorInfo = assertionResult.locatorInfo;
       operationAssertion = assertionResult.assertion;
       break;
@@ -408,7 +419,12 @@ export async function runStep(page, testCase, step, options = {}) {
         allowHidden: String(step.match_mode || '').trim().toLowerCase() === 'visible',
       });
       await showStepAction(page, step, locatorInfo.locator, options);
-      operationAssertion = await runAssertElementMatch(locatorInfo.locator, step, options);
+      operationAssertion = await runLocatorAction(
+        page,
+        locatorInfo,
+        options,
+        () => runAssertElementMatch(locatorInfo.locator, step, options),
+      );
       break;
     }
 
@@ -855,7 +871,20 @@ async function runLocatorAction(page, locatorInfo, options, action) {
   try {
     return await action();
   } catch (error) {
-    if (options.locatorMode !== 'semantic-v1') throw error;
+    if (options.locatorMode !== 'semantic-v1') {
+      // 旧定位模式没有语义诊断，但已选中的定位器仍必须进入失败报告。
+      if (error && typeof error === 'object') {
+        error.details = {
+          source: locatorInfo.source,
+          locatorType: locatorInfo.locatorType,
+          locatorValue: locatorInfo.locatorValue,
+          matchedCount: locatorInfo.matchedCount,
+          visibleCount: locatorInfo.visibleCount,
+          ...(error.details || {}),
+        };
+      }
+      throw error;
+    }
     const locatorActionFailed = isLocatorActionFailure(error);
     const actionability = await diagnoseLocatorAction(locatorInfo.locator);
     const details = {
@@ -1609,10 +1638,14 @@ async function uploadFiles(page, locator, rawValue, options) {
 
 async function uploadCertificate(page, locator, rawValue, options) {
   const result = await uploadFiles(page, locator, rawValue, options);
+  const fileNames = result.uploaded_files.map((file) => path.basename(file));
   // 证书路径可能带有执行节点目录信息；执行结果只保留文件名，不回传路径或证书正文。
   return {
     certificate_uploaded: true,
-    uploaded_certificate_files: result.uploaded_files.map((file) => path.basename(file)),
+    uploaded_certificate_files: fileNames,
+    filename: fileNames.length === 1 ? fileNames[0] : fileNames.join(', '),
+    file_count: fileNames.length,
+    upload_status: '上传控件已设置',
     upload_input_selector: result.upload_input_selector,
     upload_via_proxy: result.upload_via_proxy,
   };
@@ -1724,13 +1757,13 @@ async function assertDownload(page, locator, rawValue, options) {
   await fs.mkdir(downloadsDir, { recursive: true });
 
   const responseWaiter = expected.mime || expected.url
-    ? page.waitForResponse((response) => downloadResponseMatches(response, expected), { timeout: Math.min(options.timeoutMs || 6000, 1500) }).catch(() => null)
-    : Promise.resolve(null);
+    ? await armDownloadResponseWaiter(page, expected, Math.min(options.timeoutMs || 6000, 5000))
+    : { promise: Promise.resolve('') };
   const [download] = await Promise.all([
     page.waitForEvent('download', { timeout: options.timeoutMs }),
     locator.click({ timeout: options.timeoutMs }),
   ]);
-  const response = await responseWaiter;
+  const responseMime = await responseWaiter.promise;
   const suggestedFilename = download.suggestedFilename();
   if (expected.filename && !suggestedFilename.includes(expected.filename)) {
     throw new RunnerError('ASSERTION_FAILED', `Downloaded filename did not match: ${expected.filename}`, {
@@ -1741,7 +1774,7 @@ async function assertDownload(page, locator, rawValue, options) {
 
   const savePath = path.join(downloadsDir, sanitizeFilename(suggestedFilename || `download-${Date.now()}`));
   await download.saveAs(savePath);
-  const downloadedMime = String(response?.headers()['content-type'] || guessMimeType(savePath));
+  const downloadedMime = String(responseMime || guessMimeType(savePath));
   if (expected.mime) {
     const actualMime = downloadedMime.toLowerCase();
     if (!actualMime.includes(expected.mime.toLowerCase())) {
@@ -1815,10 +1848,65 @@ function parseDownloadExpected(rawValue) {
   return { filename: value };
 }
 
+async function armDownloadResponseWaiter(page, expected, timeoutMs) {
+  const pageResponsePromise = page.waitForResponse((response) => downloadResponseMatches(response, expected), {
+    timeout: timeoutMs,
+  }).then((response) => responseHeader(response.headers(), 'content-type')).catch(() => '');
+
+  try {
+    const session = await page.context().newCDPSession(page);
+    await session.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Response' }] });
+    let responseHandler;
+    const cdpResponsePromise = new Promise((resolve) => {
+      responseHandler = async (event) => {
+        const matches = downloadResponseMetadataMatches(event?.request?.url, event?.responseStatusCode, event
+          ?.responseHeaders, expected);
+        await session.send('Fetch.continueResponse', { requestId: event.requestId }).catch(async () => {
+          await session.send('Fetch.continueRequest', { requestId: event.requestId }).catch(() => {});
+        });
+        if (matches) {
+          resolve(responseHeader(event.responseHeaders, 'content-type'));
+        }
+      };
+      session.on('Fetch.requestPaused', responseHandler);
+    });
+    return {
+      promise: Promise.race([pageResponsePromise, cdpResponsePromise]).finally(async () => {
+        if (responseHandler) session.off('Fetch.requestPaused', responseHandler);
+        await session.send('Fetch.disable').catch(() => {});
+        await session.detach().catch(() => {});
+      }),
+    };
+  } catch {
+    // Firefox/WebKit 不支持 CDP，会继续使用 Playwright 响应事件和扩展名回退。
+    return { promise: pageResponsePromise };
+  }
+}
+
 function downloadResponseMatches(response, expected) {
-  if (expected.url && !urlMatches(response.url(), expected.url)) return false;
-  if (!expected.url && expected.filename && !response.url().includes(expected.filename)) return false;
-  return response.status() >= 200 && response.status() < 400;
+  return downloadResponseMetadataMatches(response.url(), response.status(), response.headers(), expected);
+}
+
+function downloadResponseMetadataMatches(responseUrl, responseStatus, responseHeaders, expected) {
+  if (expected.url && !urlMatches(responseUrl, expected.url)) return false;
+  if (!expected.url && expected.filename) {
+    // 下载接口常把动态文件名放在 Content-Disposition，而不是下载请求 URL 中。
+    const expectedFilename = expected.filename.toLowerCase();
+    const normalizedUrl = String(responseUrl || '').toLowerCase();
+    const contentDisposition = responseHeader(responseHeaders, 'content-disposition').toLowerCase();
+    if (!normalizedUrl.includes(expectedFilename) && !contentDisposition.includes(expectedFilename)) return false;
+  }
+  return Number(responseStatus) >= 200 && Number(responseStatus) < 400;
+}
+
+function responseHeader(headers, name) {
+  const normalizedName = String(name || '').toLowerCase();
+  if (Array.isArray(headers)) {
+    const item = headers.find((header) => String(header?.name || '').toLowerCase() === normalizedName);
+    return String(item?.value || '');
+  }
+  const entry = Object.entries(headers || {}).find(([key]) => String(key).toLowerCase() === normalizedName);
+  return String(entry?.[1] || '');
 }
 
 function guessMimeType(filePath) {

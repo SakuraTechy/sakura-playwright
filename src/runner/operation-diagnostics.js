@@ -225,6 +225,13 @@ const RESULT_FACT_LABELS = Object.freeze({
   target: '执行目标',
   filename: '文件名',
   file_count: '文件数量',
+  upload_status: '上传结果',
+  certificate_uploaded: '证书上传',
+  uploaded_certificate_files: '已上传证书文件',
+  downloaded_filename: '下载文件名',
+  downloaded_mime: '下载 MIME',
+  downloaded_bytes: '下载字节数',
+  downloaded_sha256: '下载 SHA256',
   affected_rows: '影响行数',
   row_count: '返回行数',
   exit_code: '退出码',
@@ -234,7 +241,9 @@ const RESULT_FACT_KEYS = [
   'switched_page_index', 'closed_page_url', 'closed_page_title', 'active_page_url', 'active_page_title',
   'active_page_index', 'frame_url', 'frame_depth', 'evaluated', 'evaluation_result_type', 'input_date_value',
   'wait_duration_ms', 'implicit_wait_ms', 'previous_implicit_wait_ms', 'dialog_action', 'dialog_handled',
-  'dialog_type', 'selected', 'target', 'filename', 'file_count', 'affected_rows', 'row_count', 'exit_code',
+  'dialog_type', 'selected', 'target', 'filename', 'file_count', 'upload_status', 'certificate_uploaded',
+  'uploaded_certificate_files', 'downloaded_filename', 'downloaded_mime',
+  'downloaded_bytes', 'downloaded_sha256', 'affected_rows', 'row_count', 'exit_code',
 ];
 
 export function diagnosticProfileForStep(step = {}) {
@@ -256,6 +265,7 @@ export function buildOperationDiagnostic(definitionStep = {}, runtimeStep = {}, 
     const assertion = buildAssertionDiagnostic(actionType, definitionStep, runtimeStep, stepResult);
     if (assertion) outcome.assertion = assertion;
   }
+  const assertion = outcome.assertion || null;
   const operation = {
     schema_version: 1,
     ...(firstText(definitionStep.catalog_version, runtimeStep.catalog_version)
@@ -264,7 +274,8 @@ export function buildOperationDiagnostic(definitionStep = {}, runtimeStep = {}, 
     executor: String(options.executor || 'playwright'),
     method: buildMethodIdentity(definitionStep, runtimeStep, actionType),
     summary: ACTION_SUMMARIES[actionType] || `动作 ${actionType || 'custom'} 执行完成`,
-    inputs: collectInputs(definitionStep, runtimeStep, actionType),
+    // 断言执行值必须来自执行器读取的实际结果，不能继续复用期望值。
+    inputs: applyAssertionActual(collectInputs(definitionStep, runtimeStep, actionType), profile, assertion),
     outcome,
   };
   if (target) operation.target = target;
@@ -292,6 +303,17 @@ export function attachOperationDiagnosticIfEnabled(stepResult, definitionStep, r
     return cleanResult;
   }
   return attachOperationDiagnostic(stepResult, definitionStep, runtimeStep, diagnosticOptions);
+}
+
+function applyAssertionActual(inputs, profile, assertion) {
+  if (profile !== 'assertion' || !assertion?.actual || assertion.actual.value_state === 'unavailable') {
+    return inputs;
+  }
+  return inputs.map((input) => {
+    const key = String(input?.key || '').toLowerCase();
+    const expected = input?.role === 'expected' || ['expect', 'regex', 'attribute'].includes(key);
+    return expected ? { ...input, actual: assertion.actual } : input;
+  });
 }
 
 function buildMethodIdentity(definitionStep, runtimeStep, actionType) {
@@ -332,8 +354,8 @@ function collectInputs(definitionStep, runtimeStep, actionType) {
 function buildInput(key, configured, effective, definitionStep, field = null) {
   if (configured === undefined && effective === undefined) return null;
   const masked = isMasked(definitionStep, key);
-  const configuredDisplay = displayValue(key, configured, masked, field);
-  const effectiveDisplay = displayValue(key, effective, masked, field);
+  const configuredDisplay = displayValue(key, configured, masked, field, false);
+  const effectiveDisplay = displayValue(key, effective, masked, field, false);
   const source = inputSource(key, configured, effective, field);
   return {
     key,
@@ -404,6 +426,9 @@ function buildAssertionDiagnostic(actionType, definitionStep, runtimeStep, resul
   const explicit = result.operation_assertion;
   if (explicit && typeof explicit === 'object') return sanitizeAssertion(explicit);
   const details = result.details && typeof result.details === 'object' ? result.details : {};
+  if (actionType === 'assert_download') {
+    return buildDownloadAssertionDiagnostic(definitionStep, runtimeStep, result, details);
+  }
   const expected = firstValue(
     runtimeStep.expect,
     runtimeStep.expected,
@@ -426,6 +451,62 @@ function buildAssertionDiagnostic(actionType, definitionStep, runtimeStep, resul
     ...(actual != null ? { actual: displayValue('actual', actual, false) } : { actual: { value_state: 'unavailable' } }),
     passed: result.status === 'passed',
   };
+}
+
+function buildDownloadAssertionDiagnostic(definitionStep, runtimeStep, result, details) {
+  const comparisons = [
+    ['expected_filename', 'actual_filename', '下载文件名', 'contains'],
+    ['expected_mime', 'actual_mime', '下载文件 MIME', 'contains'],
+    ['expected_min_bytes', 'actual_bytes', '下载文件大小', 'greater_than_or_equal'],
+    ['expected_max_bytes', 'actual_bytes', '下载文件大小', 'less_than_or_equal'],
+    ['expected_sha256', 'actual_sha256', '下载文件 SHA256', 'equals'],
+  ];
+  for (const [expectedKey, actualKey, subject, operator] of comparisons) {
+    const expected = details[expectedKey];
+    const actual = details[actualKey];
+    if (expected === undefined && actual === undefined) continue;
+    return {
+      subject,
+      operator,
+      ...(expected !== undefined ? { expected: displayValue('expect', expected, false) } : {}),
+      actual: actual !== undefined
+        ? displayValue('actual', actual, false)
+        : { value_state: 'unavailable' },
+      passed: result.status === 'passed',
+    };
+  }
+
+  const configured = firstValue(runtimeStep.value, definitionStep.value);
+  const expected = parseDownloadExpectation(configured);
+  const actual = Object.fromEntries([
+    ['filename', result.downloaded_filename],
+    ['mime', result.downloaded_mime],
+    ['bytes', result.downloaded_bytes],
+    ['sha256', result.downloaded_sha256],
+  ].filter(([, value]) => value !== undefined && value !== null && value !== ''));
+  if (expected == null && Object.keys(actual).length === 0 && !result.status) return null;
+  return {
+    subject: '下载文件',
+    operator: 'matches',
+    ...(expected != null ? { expected: displayValue('expect', expected, false) } : {}),
+    actual: Object.keys(actual).length
+      ? displayValue('actual', actual, false)
+      : { value_state: 'unavailable' },
+    passed: result.status === 'passed',
+  };
+}
+
+function parseDownloadExpectation(value) {
+  if (value == null || value === '') return null;
+  if (typeof value === 'object') return value;
+  const text = String(value).trim();
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+  } catch {
+    // 下载断言兼容只填写文件名片段的旧步骤。
+  }
+  return { filename: text };
 }
 
 function sanitizeAssertion(assertion) {
@@ -481,19 +562,21 @@ function inputRole(key, field = null) {
   return 'input';
 }
 
-function displayValue(key, value, masked, field = null) {
+function displayValue(key, value, masked, field = null, truncate = true) {
   if (value === undefined || value === null) return null;
   if (masked || SENSITIVE_KEY.test(key)) return { value_state: 'masked' };
+  if (key === 'certificate_uploaded') return { value_state: 'visible', preview: value === true ? '成功' : '失败' };
   if (field?.result_display === 'basename' || PATH_KEY.test(key)) {
     return { value_state: 'visible', preview: basename(value) };
   }
   if (field?.sensitivity === 'restricted' || field?.result_display === 'definition_endpoint' || RESTRICTED_KEY.test(key)) {
     return { value_state: 'restricted' };
   }
-  if (URL_KEY.test(key)) return { value_state: 'visible', preview: safeUrlText(value) };
-  if (Array.isArray(value)) return { value_state: 'visible', preview: safeText(value.map(stringify).join(', ')) };
-  if (typeof value === 'object') return { value_state: 'visible', preview: safeText(JSON.stringify(value)) };
-  return { value_state: 'visible', preview: safeText(value) };
+  const text = truncate ? safeText : fullText;
+  if (URL_KEY.test(key)) return { value_state: 'visible', preview: safeUrlText(value, truncate) };
+  if (Array.isArray(value)) return { value_state: 'visible', preview: text(value.map(stringify).join(', ')) };
+  if (typeof value === 'object') return { value_state: 'visible', preview: text(JSON.stringify(value)) };
+  return { value_state: 'visible', preview: text(value) };
 }
 
 function isRestrictedField(key, field = null) {
@@ -524,12 +607,23 @@ function isMasked(step, key) {
 }
 
 function basename(value) {
+  if (value && typeof value === 'object') {
+    const fileName = value.file_name || value.fileName || value.original_name || value.originalName
+      || value.name || value.path || value.local_path || value.localPath;
+    if (fileName) return basename(fileName);
+    if (value.scope === 'project_environment') {
+      const slot = value.slot_id || value.slotId;
+      return slot ? `环境证书角色（${slot}）` : '环境证书角色';
+    }
+    return safeText(value);
+  }
   const text = String(value);
   return text.split(/[\\/]/).filter(Boolean).at(-1) || text;
 }
 
-function safeUrlText(value) {
+function safeUrlText(value, truncate = true) {
   const text = String(value);
+  const display = truncate ? safeText : fullText;
   try {
     const url = new URL(text);
     for (const key of [...url.searchParams.keys()]) {
@@ -537,15 +631,19 @@ function safeUrlText(value) {
     }
     url.username = '';
     url.password = '';
-    return safeText(url.toString());
+    return display(url.toString());
   } catch {
-    return safeText(text.replace(/([?&](?:token|key|code|password|secret)=[^&]*)/gi, '$1******'));
+    return display(text.replace(/([?&](?:token|key|code|password|secret)=[^&]*)/gi, '$1******'));
   }
 }
 
 function safeText(value) {
-  const text = stringify(value).replace(/[\r\n]+/g, ' ');
+  const text = fullText(value);
   return text.length > MAX_PREVIEW_LENGTH ? `${text.slice(0, MAX_PREVIEW_LENGTH)}…` : text;
+}
+
+function fullText(value) {
+  return stringify(value).replace(/[\r\n]+/g, ' ');
 }
 
 function stringify(value) {

@@ -23,6 +23,29 @@ test('partial execution keeps the same unique id generated from the full case', 
   assert.equal(steps[0].original_step_id, 1);
 });
 
+test('disabled admin steps are excluded before the Runner starts execution', () => {
+  const steps = normalizeSteps([
+    { id: 'STEP_001', step_index: 0, action_type: 'click', status: 'ENABLE' },
+    { id: 'STEP_002', step_index: 1, action_type: 'click', status: 'DISABLE' },
+    { id: 'STEP_003', step_index: 2, action_type: 'click', status: 2 },
+    { id: 'STEP_004', step_index: 3, action_type: 'click', status: 'enabled' },
+  ]);
+
+  assert.deepEqual(steps.map((step) => step.id), ['STEP_001', 'STEP_004']);
+  assert.deepEqual(steps.map((step) => step.step_index), [0, 3]);
+});
+
+test('partial execution uses definition indexes when earlier steps are disabled', () => {
+  const steps = normalizeSteps([
+    { id: 'STEP_001', step_index: 0, action_type: 'click', status: 'ENABLE' },
+    { id: 'STEP_002', step_index: 1, action_type: 'click', status: 'DISABLE' },
+    { id: 'STEP_003', step_index: 2, action_type: 'click', status: 'ENABLE' },
+  ], 2);
+
+  assert.deepEqual(steps.map((step) => step.id), ['STEP_003']);
+  assert.deepEqual(steps.map((step) => step.step_index), [2]);
+});
+
 test('admin execution id keeps the original recorded id for result tracing', () => {
   const steps = normalizeSteps([
     { id: 'CASE_STEP_005', original_step_id: 1, step_index: 4, action_type: 'click' },

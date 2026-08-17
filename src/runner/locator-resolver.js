@@ -1,17 +1,26 @@
 import { RunnerError } from '../shared/utils.js';
 import { resolveSemanticLocator } from './semantic-locator-resolver.js';
 
-const CANDIDATE_TYPES = new Set([
+export const CANDIDATE_TYPES = new Set([
   'css_attr_data-testid',
   'css_attr_data-test',
+  'css_attr_data-qa',
+  'css_attr_data-cy',
   'css_attr_name',
   'css_attr_aria-label',
   'css_attr_placeholder',
+  'css_attr_title',
+  'css_attr_role',
   'css_id',
   'css_fallback',
   'xpath_fallback',
+  'component_root_class',
+  'component_root_combo',
+  'component_root_sibling',
   'table_cell_css',
   'table_cell_xpath',
+  'tree_interaction',
+  'tree_node_text',
   'tree_item_text',
   'text_exact',
   'text_exact_tag',
@@ -49,9 +58,11 @@ const TABLE_WRAPPERS = {
 };
 
 export async function resolveLocator(page, step, options = {}) {
+  const meta = parseLocatorMeta(step.locator_meta);
+  assertSupportedLocatorStrategies(step, meta);
   if (options.locatorMode === 'semantic-v1') {
     try {
-      return await resolveSemanticLocator(page, step, options, parseLocatorMeta(step.locator_meta));
+      return await resolveSemanticLocator(page, step, options, meta);
     } catch (error) {
       // 可见性断言需要区分“唯一节点已挂载但隐藏”和“节点不存在”。
       // 仅该调用显式允许回退，点击和输入仍坚持选择可见目标。
@@ -80,6 +91,7 @@ async function resolveLegacyLocator(page, step, options = {}) {
 
   const byXpath = await tryXpath(page, step.target_xpath, 'target_xpath', options, meta?.context || {});
   if (byXpath.ok) return byXpath;
+  if (['LOCATOR_XPATH_INVALID', 'LOCATOR_XPATH_UNSUPPORTED'].includes(byXpath.error?.code)) throw byXpath.error;
   if (byXpath.error?.code === 'LOCATOR_AMBIGUOUS') lastAmbiguous = byXpath.error;
 
   const byText = await tryTextFallback(page, step, options, meta?.context || {});
@@ -96,6 +108,36 @@ async function resolveLegacyLocator(page, step, options = {}) {
     target_xpath: maskIfNeeded(step.target_xpath),
     candidate_count: candidates.length,
   });
+}
+
+function assertSupportedLocatorStrategies(step, meta) {
+  const values = [
+    { value: step?.target_selector, source: 'target_selector' },
+    { value: step?.target_xpath, source: 'target_xpath' },
+    ...(Array.isArray(meta?.candidates) ? meta.candidates : []).map((candidate) => ({
+      value: candidate?.value,
+      source: `locator_meta.${String(candidate?.type || 'unknown')}`,
+      type: String(candidate?.type || '').trim().toLowerCase(),
+    })),
+  ];
+  const privateTypes = new Set(['jquery', 'js', 'js_path', 'jspath', 'testrigor']);
+  for (const item of values) {
+    const strategy = privateTypes.has(item.type) ? item.type : unsupportedLocatorStrategy(item.value);
+    if (!strategy) continue;
+    throw new RunnerError('LOCATOR_STRATEGY_UNSUPPORTED', `Unsupported locator strategy: ${strategy}`, {
+      source: item.source,
+      strategy,
+    });
+  }
+}
+
+function unsupportedLocatorStrategy(value) {
+  const raw = String(value || '').trim();
+  const prefixed = /^(jquery|js(?:_path)?|jspath|testrigor)\s*=/i.exec(raw);
+  if (prefixed) return prefixed[1].toLowerCase();
+  if (/^\$\s*\(/.test(raw)) return 'jquery';
+  if (/^(?:document|window)\s*\.\s*(?:querySelector|querySelectorAll)\s*\(/i.test(raw)) return 'js';
+  return '';
 }
 
 export function parseLocatorMeta(raw) {
@@ -120,8 +162,12 @@ async function tryCandidate(page, candidate, source, options, context) {
 
   if (type === 'table_cell_css') return tryTableCandidate(page, candidate, source, options, context, 'css');
   if (type === 'table_cell_xpath') return tryTableCandidate(page, candidate, source, options, context, 'xpath');
-  if (type === 'tree_item_text') return tryTreeCandidate(page, candidate, source, options, context);
-  if (type.startsWith('css_')) return tryCss(page, value, source, options, context, type);
+  if (['tree_interaction', 'tree_node_text', 'tree_item_text'].includes(type)) {
+    return tryTreeCandidate(page, candidate, source, options, context);
+  }
+  if (type.startsWith('css_') || type.startsWith('component_root_')) {
+    return tryCss(page, value, source, options, context, type);
+  }
   if (type === 'xpath_fallback') return tryXpath(page, value, source, options, context, type);
   if (type === 'text_exact') {
     const root = rootForContext(page, context);
@@ -159,19 +205,70 @@ async function tryTreeCandidate(page, candidate, source, options, context) {
   const value = String(candidate.value || '').trim();
   if (!value) return { ok: false };
   const root = rootForContext(page, context);
-  const treeSelector = String(treeContext.selector || treeContext.target_selector || '[role="tree"], .el-tree, .ant-tree, [data-tree="true"]').trim();
-  const tree = root.locator(treeSelector).first();
-  const itemSelector = String(treeContext.item_selector || '[role="treeitem"], .el-tree-node, .ant-tree-treenode, [data-tree-node="true"]').trim();
-  const item = tree.locator(itemSelector).filter({ hasText: value });
+  const config = parseJsonObject(value);
+  const title = String(config?.title || value).trim();
+  if (!title) return { ok: false };
+  const sameTitleIndex = Math.max(0, Number(
+    config?.sameTitleIndex ?? config?.same_title_index ?? treeContext?.sameTitleIndex ?? 0,
+  ) || 0);
+  let item;
+  if (candidate.type === 'tree_interaction') {
+    if (!config?.title) return { ok: false };
+    if (config.framework === 'vtree') {
+      const node = root.locator('.vtree-tree-node__indent-wrapper').filter({ hasText: title }).nth(sameTitleIndex);
+      item = config.kind === 'expand_toggle'
+        ? node.locator('.vtree-tree-node__square.vtree-tree-node__expand').first()
+        : node.locator('.vtree-tree-node__title, .vtree-tree-node__node-body').first();
+    } else {
+      const node = root.locator('.ant-tree-treenode, .ant-tree-node-content-wrapper, [role="treeitem"]')
+        .filter({ hasText: title })
+        .nth(sameTitleIndex);
+      if (config.kind === 'expand_toggle') {
+        item = node.locator('.ant-tree-switcher').first();
+      } else if (config.kind === 'node_action') {
+        item = node.locator([
+          '.tree-node-actions .data-source-icon',
+          '.tree-node-actions [class*="data-source-icon"]',
+          '.tree-node-actions .action-icon-wrapper',
+          '.tree-node-actions [class*="action-icon"]',
+        ].join(', ')).nth(Math.max(0, Number(config.actionIndex || 0) || 0));
+      } else {
+        item = node.locator('.ant-tree-node-content-wrapper, .ant-tree-title').first();
+      }
+    }
+  } else if (treeContext.selector || treeContext.target_selector) {
+    const treeSelector = String(treeContext.selector || treeContext.target_selector).trim();
+    const itemSelector = String(treeContext.item_selector || '[role="treeitem"], .el-tree-node, .ant-tree-treenode, [data-tree-node="true"]').trim();
+    item = root.locator(treeSelector).first().locator(itemSelector).filter({ hasText: title }).nth(sameTitleIndex);
+  } else {
+    item = root.locator([
+      '.el-tree-node__content',
+      '.ivu-tree-title',
+      '.arco-tree-node-title',
+      '.n-tree-node-content',
+      '.ant-tree-treenode',
+      '.vtree-tree-node__indent-wrapper',
+      '[role="treeitem"]',
+    ].join(', ')).filter({ hasText: title }).nth(sameTitleIndex);
+  }
   return settleLocator({
     page,
     locator: item,
     source: `tree:${source}`,
-    locatorType: 'tree_item_text',
+    locatorType: candidate.type,
     locatorValue: value,
     options,
     context,
   });
+}
+
+function parseJsonObject(value) {
+  try {
+    const parsed = JSON.parse(String(value || ''));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 async function tryCss(page, selector, source, options, context, type = 'css') {
@@ -212,7 +309,18 @@ async function tryXpath(page, xpath, source, options, context, type = 'xpath') {
     });
   } catch (error) {
     if (error instanceof RunnerError) return { ok: false, error };
-    return { ok: false };
+    const message = String(error?.message || error || '');
+    const code = /not a node set|does not resolve to a node|non-node/i.test(message)
+      ? 'LOCATOR_XPATH_UNSUPPORTED'
+      : 'LOCATOR_XPATH_INVALID';
+    return {
+      ok: false,
+      error: new RunnerError(code, message || 'XPath evaluation failed', {
+        source,
+        raw_xpath: value,
+        normalized_xpath: value,
+      }),
+    };
   }
 }
 
@@ -326,7 +434,8 @@ async function findBestRowByText(rows, rowText, rowCount) {
 async function settleLocator({ page, locator, source, locatorType, locatorValue, options, context, makeScopedLocator }) {
   const timeout = options.timeoutMs || 6000;
   const scopedSource = sourceForContext(source, context);
-  const count = await locator.count().catch(() => 0);
+  // 选择器解析异常必须交回 tryCss/tryXpath 分类，不能折叠成 LOCATOR_NOT_FOUND。
+  const count = await locator.count();
   if (count < 1) return { ok: false };
 
   const visibleIndexes = await collectVisibleIndexes(locator, count, timeout);

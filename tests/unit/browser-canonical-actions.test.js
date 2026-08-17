@@ -67,7 +67,29 @@ test('canonical input, selection, upload and assertion actions use Playwright pr
   assert.deepEqual(page.locator('#clear').fillCalls, ['']);
   assert.match(dateResult.input_date_value, /^\d{4}$/);
   assert.deepEqual(certificateResult.uploaded_certificate_files, ['cert.pem']);
+  assert.equal(certificateResult.filename, 'cert.pem');
+  assert.equal(certificateResult.file_count, 1);
+  assert.equal(certificateResult.upload_status, '上传控件已设置');
   assert.equal(page.locator('#certificate').inputFiles[0].endsWith('cert.pem'), true);
+});
+
+test('legacy locator assertion failure preserves the selected locator', async () => {
+  const page = new FakePage({ '#message': new FakeLocator({ tag: 'div', text: '实际内容' }) });
+  const browserContext = createBrowserActionContext();
+
+  await assert.rejects(
+    runStep(page, testCase, {
+      id: 'ASSERT_FAIL',
+      step_index: 0,
+      action_type: 'assert_text',
+      target_selector: '#message',
+      expect: '期望内容',
+    }, stepOptions(browserContext)),
+    (error) => error?.code === 'ASSERTION_FAILED'
+      && error.details?.source === 'target_selector'
+      && error.details?.locatorType === 'css'
+      && error.details?.locatorValue === '#message',
+  );
 });
 
 test('frame stack, pre-armed dialog and close-all-page actions retain browser-only safety boundaries', async () => {
