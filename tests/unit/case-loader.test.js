@@ -35,6 +35,16 @@ test('disabled admin steps are excluded before the Runner starts execution', () 
   assert.deepEqual(steps.map((step) => step.step_index), [0, 3]);
 });
 
+test('失败后继续开关兼容 Admin 的下划线和驼峰字段', () => {
+  const steps = normalizeSteps([
+    { id: 'STEP_001', action_type: 'click', continue_on_failure: 'true' },
+    { id: 'STEP_002', action_type: 'database_sql', continueOnFailure: true },
+    { id: 'STEP_003', action_type: 'input', continue_on_failure: false },
+  ]);
+
+  assert.deepEqual(steps.map((step) => step.continue_on_failure), [true, true, false]);
+});
+
 test('partial execution uses definition indexes when earlier steps are disabled', () => {
   const steps = normalizeSteps([
     { id: 'STEP_001', step_index: 0, action_type: 'click', status: 'ENABLE' },

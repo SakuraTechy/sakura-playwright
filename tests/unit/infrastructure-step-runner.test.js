@@ -59,6 +59,7 @@ test('database step creates a server-resolved task without sending SQL or target
   assert.equal('target_ref' in request, false);
   assert.equal(result.status, 'passed');
   assert.equal(result.infrastructure_task_id, 'INFRA_001');
+  assert.equal(result.details.infrastructure_task_id, 'INFRA_001');
   assert.equal(result.affected_rows, 1);
   assert.equal(logs.length, 1);
 });
@@ -104,6 +105,7 @@ test('infrastructure result preview is written into step.details', async () => {
     id: 'STEP_PREVIEW', step_index: 4, action_type: 'database_sql',
   }, { api, infrastructureExecution: { caseKey: 'SCENE:CASE' } });
   assert.equal(result.details.infrastructure.kind, 'DATABASE_QUERY');
+  assert.equal(result.details.infrastructure_task_id, 'INFRA_PREVIEW');
   assert.equal(result.details.infrastructure.resultSets[0].rows[0].user_id, 1);
 });
 

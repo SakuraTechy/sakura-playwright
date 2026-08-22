@@ -40,6 +40,13 @@ export function normalizeSteps(rawSteps, startStep = 0) {
         description: step.description ?? '',
         wait_before: Number(step.wait_before) || 0,
         is_overlay: step.is_overlay === true || step.is_overlay === 1 || step.is_overlay === '1' ? 1 : 0,
+        continue_on_failure: step.continue_on_failure === true
+          || step.continue_on_failure === 1
+          || step.continue_on_failure === '1'
+          || step.continue_on_failure === 'true'
+          || step.continueOnFailure === true
+          || step.continueOnFailure === 1
+          || step.continueOnFailure === 'true',
       });
     })
     .sort((a, b) => a.step_index - b.step_index);

@@ -83,6 +83,22 @@ export function markStepFailed(result, step, error, startedAt) {
   return serialized;
 }
 
+export function markStepSkipped(result, step, error, startedAt) {
+  const serialized = serializeError(error);
+  result.steps.push({
+    step_index: step.step_index,
+    step_id: step.id,
+    ...(step.original_step_id != null ? { original_step_id: step.original_step_id } : {}),
+    action_type: step.action_type,
+    status: 'skipped',
+    duration_ms: durationMs(startedAt),
+    error: serialized.message,
+    error_code: serialized.code,
+    details: serialized.details,
+  });
+  return serialized;
+}
+
 export function markRunPassed(result) {
   result.status = 'passed';
   result.success = true;

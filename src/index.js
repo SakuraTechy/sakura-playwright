@@ -45,6 +45,7 @@ import {
   markRunFailed,
   markRunPassed,
   markStepFailed,
+  markStepSkipped,
   reportRunResult,
 } from './reporting/result-reporter.js';
 import { createExecutionLogger, formatStepLogLabel } from './reporting/execution-logger.js';
@@ -440,7 +441,12 @@ async function main() {
           executionLogger.info('locator', `${stepLogLabel}，${locatorDetails}`, true);
         }
       } catch (error) {
-        markStepFailed(result, step, error, stepStartedAt);
+        const skipAfterFailure = runtimeStep?.continue_on_failure === true;
+        if (skipAfterFailure) {
+          markStepSkipped(result, step, error, stepStartedAt);
+        } else {
+          markStepFailed(result, step, error, stepStartedAt);
+        }
         const failedStep = result.steps.at(-1);
         attachStepVariableReferences(failedStep, runtimeVariableReferences);
         if (failedStep) {
@@ -451,8 +457,8 @@ async function main() {
             { executor: 'playwright', enabled: config.operationDiagnosticEnabled },
           );
         }
-        executionLogger.error('step', `${stepLogLabel}，执行失败：${error?.message || String(error)}`);
-        throw error;
+        executionLogger.error('step', `${stepLogLabel}，执行失败${skipAfterFailure ? '，已跳过并继续' : ''}：${error?.message || String(error)}`);
+        if (!skipAfterFailure) throw error;
       }
     }
 

@@ -149,9 +149,11 @@ function buildTaskResult(step, taskId, task, status) {
     executor: task.executor || 'infrastructure-agent',
     infrastructure_task_id: taskId,
     // 受限预览进入统一 step.details，完整输出和大结果只能通过 Admin 受鉴权附件读取。
-    ...(infrastructure
-      ? { details: { infrastructure } }
-      : {}),
+    // 分层执行历史从 details 读取任务标识，再通过受控定义快照展示 SQL 或 Shell 命令。
+    details: {
+      infrastructure_task_id: taskId,
+      ...(infrastructure ? { infrastructure } : {}),
+    },
     // 仅在当前内存循环中交给 VariableContext；调用方会在写入报告前删除该字段。
     ...(task?.result?.variables && typeof task.result.variables === 'object'
       ? { _runtime_variables: task.result.variables }
