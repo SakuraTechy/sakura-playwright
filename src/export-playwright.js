@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ApiClient } from './api/api-client.js';
 import { normalizeCase } from './runner/case-loader.js';
-import { formatPlatformDateTime, loadRunnerEnv, parseCliArgs, timestampForPath, trimTrailingSlash } from './shared/utils.js';
+import { formatPlatformDateTime, loadRunnerEnv, parseCliArgs, resolveAdminApiBase, timestampForPath, trimTrailingSlash } from './shared/utils.js';
 
 async function main() {
   const config = parseExportArgs();
@@ -23,7 +23,7 @@ function parseExportArgs(argv = process.argv.slice(2), env = process.env) {
   if (!caseId) throw new Error('Missing required --case-id');
   return {
     caseId,
-    apiBase: trimTrailingSlash(args['api-base'] || mergedEnv.CUECAST_API_BASE || 'http://127.0.0.1:4173/api'),
+    apiBase: trimTrailingSlash(args['api-base'] || resolveAdminApiBase(mergedEnv)),
     token: args.token || mergedEnv.CUECAST_TOKEN || '',
     output: args.output ? path.resolve(process.cwd(), args.output) : '',
     artifactDir: args['artifact-dir'] || mergedEnv.RUNNER_ARTIFACT_DIR || 'artifacts',
@@ -46,7 +46,7 @@ export async function renderSpec(testCase, config) {
     '  let page = initialPage;',
     '  const cuecastPages = [page];',
     '  const cuecastVariables = {};',
-    `  const apiBase = process.env.CUECAST_API_BASE || ${quoteJs(config.apiBase)};`,
+    `  const apiBase = process.env.SAKURA_ADMIN_API_BASE || process.env.CUECAST_API_BASE || ${quoteJs(config.apiBase)};`,
     `  const startUrl = process.env.CUECAST_START_URL || ${quoteJs(testCase.start_url)};`,
     '  const networkEvents = [];',
     '  const attachNetworkRecorder = (targetPage) => {',

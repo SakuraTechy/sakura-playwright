@@ -15,6 +15,16 @@ export class RunnerError extends Error {
   }
 }
 
+// 新变量表达真实依赖关系；保留旧变量以兼容已有 Jenkins、脚本和 Runner 配置。
+export function resolveAdminApiBase(env = process.env, fallback = 'http://127.0.0.1:4173/api') {
+  return env.SAKURA_ADMIN_API_BASE || env.CUECAST_API_BASE || fallback;
+}
+
+// 新变量表达协议用途；旧变量继续作为兼容回退。
+export function resolveAdminApiEnabled(env = process.env) {
+  return parseBoolean(env.SAKURA_ADMIN_API || env.CUECAST_ADMIN_API, false);
+}
+
 export function parseArgs(argv = process.argv.slice(2), env = process.env) {
   const args = parseCliArgs(argv);
   const mergedEnv = loadRunnerEnv(argv, env);
@@ -27,10 +37,10 @@ export function parseArgs(argv = process.argv.slice(2), env = process.env) {
     executionId: args['execution-id'] || mergedEnv.CUECAST_EXECUTION_ID || '',
     executionCapability: args['execution-capability'] || mergedEnv.CUECAST_EXECUTION_CAPABILITY || '',
     projectEnvironmentId: args['project-environment-id'] || mergedEnv.CUECAST_PROJECT_ENVIRONMENT_ID || '',
-    apiBase: trimTrailingSlash(args['api-base'] || mergedEnv.CUECAST_API_BASE || 'http://127.0.0.1:4173/api'),
+    apiBase: trimTrailingSlash(args['api-base'] || resolveAdminApiBase(mergedEnv)),
     // 平台任务未传 API 地址时使用 .env 的 admin 协议；旧 test-lab 命令显式传入 mock API 时保持原协议。
     // --admin-api 始终拥有最高优先级，可覆盖这两个默认分支。
-    adminApi: parseBoolean(args['admin-api'] ?? (args['api-base'] == null ? mergedEnv.CUECAST_ADMIN_API : false), false),
+    adminApi: parseBoolean(args['admin-api'] ?? (args['api-base'] == null ? resolveAdminApiEnabled(mergedEnv) : false), false),
     token: args.token || mergedEnv.CUECAST_TOKEN || '',
     accessKey: mergedEnv.SAKURA_ADMIN_ACCESS_KEY || mergedEnv.CUECAST_ACCESS_KEY || '',
     secretKey: mergedEnv.SAKURA_ADMIN_SECRET_KEY || mergedEnv.CUECAST_SECRET_KEY || '',

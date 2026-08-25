@@ -1,7 +1,5 @@
+artifacts/
+data/
+logs/
 node_modules/
 .env
-artifacts/
-playwright-runner-artifacts/
-playwright-runner-artifacts1/
-playwright-runner-artifacts2/
-logs/

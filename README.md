@@ -69,7 +69,7 @@ Admin 仅负责定位并启动 Runner、限制并发、注入当前登录用户�
 
 只有直接运行 `node src/index.js`、由 Jenkins 启动，或由其他机器独立启动 Runner 时，才属于外部独立 Runner流程。
 
-Runner 通过 Admin API 读取用例时，必须同时提供产品环境参数：使用 `--admin-api true`（或 `.env` 中的 `CUECAST_ADMIN_API=true`）时，设置 `--project-environment-id <id>` 或 `CUECAST_PROJECT_ENVIRONMENT_ID=<id>`。缺少该参数会在 Runner 启动前失败，避免误执行数据库中保存的原始绝对地址。
+Runner 通过 Admin API 读取用例时，必须同时提供产品环境参数：使用 `--admin-api true`（或 `.env` 中的 `SAKURA_ADMIN_API=true`）时，设置 `--project-environment-id <id>` 或 `CUECAST_PROJECT_ENVIRONMENT_ID=<id>`。缺少该参数会在 Runner 启动前失败，避免误执行数据库中保存的原始绝对地址。旧版 `CUECAST_ADMIN_API` 仍可兼容。
 
 ### 外部独立 Runner 应用认证
 
@@ -90,8 +90,8 @@ Runner 通过 Admin API 读取用例时，必须同时提供产品环境参数�
 外部 Runner 最小配置示例：
 
 ```env
-CUECAST_API_BASE=http://<Admin地址>:8000
-CUECAST_ADMIN_API=true
+SAKURA_ADMIN_API_BASE=http://<Admin地址>:8000
+SAKURA_ADMIN_API=true
 CUECAST_PROJECT_ENVIRONMENT_ID=47
 SAKURA_ADMIN_ACCESS_KEY=<应用管理中的Access Key>
 SAKURA_ADMIN_SECRET_KEY=<应用管理中的Secret Key>
@@ -124,7 +124,7 @@ Runner 访问 admin 用例时使用 `/testcases/{sceneId}/{caseId}` 双路径形
 node src/index.js --case-id <caseId> --api-base <apiBase> --ignore-https-errors true
 ```
 
-当前 admin 的 Spring API 没有 `/api` context-path，前端的 `/api` 只是开发代理前缀。如果 Runner 与 admin 不在同一节点，必须在 Runner `.env` 中把 `CUECAST_API_BASE` 设置为 Runner 节点可访问的 admin 后端地址，不能使用错误的 `127.0.0.1`。
+当前 admin 的 Spring API 没有 `/api` context-path，前端的 `/api` 只是开发代理前缀。如果 Runner 与 admin 不在同一节点，必须在 Runner `.env` 中把 `SAKURA_ADMIN_API_BASE` 设置为 Runner 节点可访问的 admin 后端地址，不能使用错误的 `127.0.0.1`。旧版 `CUECAST_API_BASE` 仍可作为兼容配置。
 
 ### 执行边界
 
@@ -316,7 +316,7 @@ Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:4173/api/runner/batches/$($
 Mock CI 默认不需要 secrets。接真实环境时通常需要：
 
 ```text
-CUECAST_API_BASE
+SAKURA_ADMIN_API_BASE
 CUECAST_TOKEN
 ```
 
@@ -812,7 +812,7 @@ python -m py_compile playwright-runner-artifacts/exports/test_case_296_m5o_stora
 - 完整成功集合 `278,279,281,282,283,284,285,286,287,288,289,290,291,292,293,294,295,296` 全部 passed。
 - 导出的 Playwright spec 可被当前项目依赖 `playwright/test` 加载并端到端执行。
 - 导出的 pytest smoke 文件可通过 `python -m py_compile`。
-- 导出文件包含 `CUECAST_START_URL`、`CUECAST_API_BASE`、`CUECAST_STORAGE_STATE` 参数入口。
+- 导出文件包含 `CUECAST_START_URL`、`SAKURA_ADMIN_API_BASE`（兼容 `CUECAST_API_BASE`）、`CUECAST_STORAGE_STATE` 参数入口。
 
 ## 录制定位语义对齐
 
@@ -837,7 +837,7 @@ CLI 参数优先级高于环境变量，环境变量优先级高于默认值。
 
 ```text
 CUECAST_CASE_IDS       批量 case ID，例如 278,279
-CUECAST_API_BASE       后端 API 地址
+SAKURA_ADMIN_API_BASE  Admin 后端 API 地址（兼容旧变量 CUECAST_API_BASE）
 CUECAST_TOKEN          后端鉴权 token
 RUNNER_WORKERS         批量 worker 数，默认 1
 RUNNER_SESSION_MODE    isolated | reuse-auth | reuse-browser，默认 isolated
@@ -857,7 +857,7 @@ RUNNER_FINISH_DELAY_MS 执行结束后关闭浏览器前停留毫秒数
 
 ## admin 产物上传
 
-当 `CUECAST_ADMIN_API=true` 时，单用例执行结束后会把以下本地产物逐项上传到 admin：
+当 `SAKURA_ADMIN_API=true`（兼容旧变量 `CUECAST_ADMIN_API=true`）时，单用例执行结束后会把以下本地产物逐项上传到 admin：
 
 - `report`：HTML 执行报告。
 - `result`：`result.json` 执行结果快照。

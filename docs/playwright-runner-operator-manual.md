@@ -454,7 +454,7 @@ npm exec -- playwright test case-296-m5o-storage.spec.js --config playwright.con
 
 ```text
 CUECAST_START_URL
-CUECAST_API_BASE
+SAKURA_ADMIN_API_BASE（兼容 CUECAST_API_BASE）
 CUECAST_STORAGE_STATE
 ```
 
@@ -530,7 +530,7 @@ node src/batch.js --case-ids 278,279 --api-base http://127.0.0.1:4173/api --work
 
 ```text
 CUECAST_CASE_IDS       批量 case ID，例如 278,279
-CUECAST_API_BASE       后端 API 地址
+SAKURA_ADMIN_API_BASE  Admin 后端 API 地址（兼容旧变量 CUECAST_API_BASE）
 CUECAST_TOKEN          后端鉴权 token
 CUECAST_PROJECT_ENVIRONMENT_ID admin 产品环境 ID
 CUECAST_STORAGE_STATE  导出脚本或真实环境使用的 storage state 文件
@@ -593,7 +593,7 @@ node src/index.js `
 也可以用环境变量：
 
 ```powershell
-$env:CUECAST_API_BASE = 'https://<真实后端>/api'
+$env:SAKURA_ADMIN_API_BASE = 'https://<真实后端>/api'
 $env:CUECAST_TOKEN = '<真实token>'
 $env:CUECAST_CASE_IDS = '1001,1002,1003'
 $env:RUNNER_WORKERS = '2'
@@ -628,7 +628,7 @@ mock CI 默认适合跑通过集合，例如：
 真实 CI 需要配置：
 
 ```text
-CUECAST_API_BASE
+SAKURA_ADMIN_API_BASE（兼容 CUECAST_API_BASE）
 CUECAST_TOKEN
 ```
 

@@ -689,7 +689,7 @@ M5-A 至 M5-O 十五批高级能力已完成并通过本地 mock 验收；完整
 
 - admin 服务所在节点安装 Node.js 和 Playwright 浏览器依赖。
 - 配置 `SAKURA_PLAYWRIGHT_RUNNER_ROOT` 指向 `sakura-playwright` 仓库根目录。
-- 在 `.env` 配置 `CUECAST_API_BASE`、`CUECAST_ADMIN_API=true` 和回放运行参数。
+- 在 `.env` 配置 `SAKURA_ADMIN_API_BASE`、`SAKURA_ADMIN_API=true` 和回放运行参数；旧版 `CUECAST_API_BASE`、`CUECAST_ADMIN_API` 仍兼容。
 - 当前 M6 支持单用例回放；原有 Jenkins 场景/计划执行链路保持不变。
 
 ### M6 回放失败定位补充（2026-07-15）
@@ -701,7 +701,7 @@ M5-A 至 M5-O 十五批高级能力已完成并通过本地 mock 验收；完整
 - Runner 弹窗配置名称已改为中文，底部按 Jenkins 模板展示场景 ID、场景名称、执行状态、上次结果、运行耗时和构建号；Jenkins 组件与执行链路未改动。
 - CDP/Runner 生成、admin 任务状态和 `debugRecord/playwrightResult` 顶层及嵌套执行时间已统一为北京时间 `yyyy-MM-dd HH:mm:ss`；旧 UTC ISO 时间由后端在入库前递归兼容转换。
 - Runner 读取用例和回传结果使用 `/testcases/{sceneKey}/{caseId}` 双路径兼容入口，避免 `%3A` 编码导致 Spring 路由 404。
-- Runner 的 `CUECAST_API_BASE` 使用 Spring 后端直连地址，不附加前端开发代理使用的 `/api` 前缀；该地址和浏览器、无头模式、产物、trace/video、HTTPS 证书策略均由 `.env` 统一提供。
+- Runner 的 `SAKURA_ADMIN_API_BASE` 使用 Spring 后端直连地址，不附加前端开发代理使用的 `/api` 前缀；该地址和浏览器、无头模式、产物、trace/video、HTTPS 证书策略均由 `.env` 统一提供。旧版 `CUECAST_API_BASE` 仍兼容。
 - 内部自签名 HTTPS 测试站点可在 Runner `.env` 设置 `RUNNER_IGNORE_HTTPS_ERRORS=true`；公网生产环境应保持为 `false` 并修复证书链。
 - admin 后端代码变更后必须重启后端；若 `/api/automation/playwright/runner/jobs` 返回 `404`，说明当前进程仍是旧版本。
 

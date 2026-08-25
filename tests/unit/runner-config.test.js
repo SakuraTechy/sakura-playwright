@@ -69,6 +69,22 @@ test('platform CLI options override runner environment defaults', () => {
   assert.equal(config.caseTimeoutMs, 120000);
 });
 
+test('Admin API base uses the new name and falls back to the legacy CueCast name', () => {
+  const preferred = parseArgs(['--case-id', '100:CASE_001'], {
+    SAKURA_ADMIN_API_BASE: 'http://admin-new:18000',
+    CUECAST_API_BASE: 'http://admin-legacy:18000',
+    SAKURA_ADMIN_API: 'false',
+    CUECAST_ADMIN_API: 'true',
+  });
+  assert.equal(preferred.apiBase, 'http://admin-new:18000');
+
+  const legacy = parseArgs(['--case-id', '100:CASE_001'], {
+    CUECAST_API_BASE: 'http://admin-legacy:18000',
+    CUECAST_ADMIN_API: 'false',
+  });
+  assert.equal(legacy.apiBase, 'http://admin-legacy:18000');
+});
+
 test('live frame quality presets balance resolution compression and refresh interval', () => {
   assert.deepEqual(resolveLiveFrameQualityPreset('smooth'), {
     deviceScaleFactor: 1,

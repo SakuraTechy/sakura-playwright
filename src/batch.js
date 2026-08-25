@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { formatPlatformDateTime, loadRunnerEnv, parseBoolean, parseCliArgs, parsePositiveInt, sleep, timestampForPath, trimTrailingSlash } from './shared/utils.js';
+import { formatPlatformDateTime, loadRunnerEnv, parseBoolean, parseCliArgs, parsePositiveInt, resolveAdminApiBase, resolveAdminApiEnabled, sleep, timestampForPath, trimTrailingSlash } from './shared/utils.js';
 import { promoteStorageState } from './runner/session-state.js';
 import { ApiClient } from './api/api-client.js';
 import { reportRunResult } from './reporting/result-reporter.js';
@@ -70,8 +70,8 @@ function parseBatchArgs(argv = process.argv.slice(2), env = process.env) {
   const video = args.video || mergedEnv.RUNNER_VIDEO || 'retain-on-failure';
   return {
     caseIds,
-    apiBase: trimTrailingSlash(args['api-base'] || mergedEnv.CUECAST_API_BASE || 'http://127.0.0.1:4173/api'),
-    adminApi: parseBoolean(args['admin-api'] ?? (args['api-base'] == null ? mergedEnv.CUECAST_ADMIN_API : false), false),
+    apiBase: trimTrailingSlash(args['api-base'] || resolveAdminApiBase(mergedEnv)),
+    adminApi: parseBoolean(args['admin-api'] ?? (args['api-base'] == null ? resolveAdminApiEnabled(mergedEnv) : false), false),
     token: args.token || mergedEnv.CUECAST_TOKEN || '',
     executionCapability: args['execution-capability'] || mergedEnv.CUECAST_EXECUTION_CAPABILITY || '',
     browser: args.browser || mergedEnv.RUNNER_BROWSER || 'chromium',

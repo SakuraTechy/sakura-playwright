@@ -4,7 +4,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { ApiClient } from './api/api-client.js';
 import { reportRunResult } from './reporting/result-reporter.js';
-import { loadRunnerEnv, parseBoolean, parseCliArgs, trimTrailingSlash } from './shared/utils.js';
+import { loadRunnerEnv, parseBoolean, parseCliArgs, resolveAdminApiBase, resolveAdminApiEnabled, trimTrailingSlash } from './shared/utils.js';
 
 async function main() {
   const args = parseCliArgs();
@@ -21,9 +21,9 @@ async function main() {
   const casesDirectory = path.join(sessionDirectory, 'cases');
   const caseEntries = (await fs.readdir(casesDirectory, { withFileTypes: true }).catch(() => []))
     .filter((entry) => entry.isFile() && entry.name.endsWith('.json'));
-  const api = parseBoolean(args['admin-api'] ?? env.CUECAST_ADMIN_API, false)
+  const api = parseBoolean(args['admin-api'] ?? resolveAdminApiEnabled(env), false)
     ? new ApiClient({
-        apiBase: trimTrailingSlash(args['api-base'] || env.CUECAST_API_BASE || 'http://127.0.0.1:4173/api'),
+        apiBase: trimTrailingSlash(args['api-base'] || resolveAdminApiBase(env)),
         token: args.token || env.CUECAST_TOKEN || '',
         accessKey: env.SAKURA_ADMIN_ACCESS_KEY || env.CUECAST_ACCESS_KEY || '',
         secretKey: env.SAKURA_ADMIN_SECRET_KEY || env.CUECAST_SECRET_KEY || '',

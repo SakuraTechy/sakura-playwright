@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ApiClient } from './api/api-client.js';
 import { normalizeCase } from './runner/case-loader.js';
-import { formatPlatformDateTime, loadRunnerEnv, parseCliArgs, timestampForPath, trimTrailingSlash } from './shared/utils.js';
+import { formatPlatformDateTime, loadRunnerEnv, parseCliArgs, resolveAdminApiBase, timestampForPath, trimTrailingSlash } from './shared/utils.js';
 
 async function main() {
   const config = parseExportArgs();
@@ -23,7 +23,7 @@ function parseExportArgs(argv = process.argv.slice(2), env = process.env) {
   if (!caseId) throw new Error('Missing required --case-id');
   return {
     caseId,
-    apiBase: trimTrailingSlash(args['api-base'] || mergedEnv.CUECAST_API_BASE || 'http://127.0.0.1:4173/api'),
+    apiBase: trimTrailingSlash(args['api-base'] || resolveAdminApiBase(mergedEnv)),
     token: args.token || mergedEnv.CUECAST_TOKEN || '',
     output: args.output ? path.resolve(process.cwd(), args.output) : '',
     artifactDir: args['artifact-dir'] || mergedEnv.RUNNER_ARTIFACT_DIR || 'artifacts',
@@ -34,7 +34,7 @@ function parseExportArgs(argv = process.argv.slice(2), env = process.env) {
 export async function renderPytest(testCase, config) {
   const preparedSteps = await Promise.all(testCase.steps.map(prepareStepForExport));
   const bodyLines = [
-    `api_base = os.environ.get("CUECAST_API_BASE") or ${quotePy(config.apiBase)}`,
+    `api_base = os.environ.get("SAKURA_ADMIN_API_BASE") or os.environ.get("CUECAST_API_BASE") or ${quotePy(config.apiBase)}`,
     `start_url = os.environ.get("CUECAST_START_URL") or ${quotePy(testCase.start_url)}`,
     `storage_state = os.environ.get("CUECAST_STORAGE_STATE") or ${quotePy(config.storageState)}`,
     'context = browser.new_context(storage_state=storage_state) if storage_state else browser.new_context()',
