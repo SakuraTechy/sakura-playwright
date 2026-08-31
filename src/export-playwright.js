@@ -99,7 +99,7 @@ function renderStep(prepared) {
     case 'navigate':
       return [`  await page.goto(${renderRuntimeString(value || step.url || '')});`];
     case 'click':
-      return [`  await ${locator}.click();`];
+      return stepClickLines(step, locator);
     case 'double_click':
       return [`  await ${locator}.dblclick();`];
     case 'right_click':
@@ -156,6 +156,41 @@ function renderStep(prepared) {
     default:
       return [`  // TODO: action ${quoteJs(action)} requires custom export handling.`];
   }
+}
+
+function stepClickLines(step, locator) {
+  const clickWhen = String(step.click_when || step.state_condition || '').trim().toLowerCase();
+  if (!clickWhen || ['always', 'any', 'none', 'no_check'].includes(clickWhen)) {
+    return [`  await ${locator}.click();`];
+  }
+  const normalized = { unchecked: 'off', closed: 'off', inactive: 'off', checked: 'on', opened: 'on', active: 'on' }[clickWhen] || clickWhen;
+  if (['exists', 'present', 'element_present', 'if_exists', 'element_exists'].includes(normalized)) {
+    const conditionLocator = renderLocator(clickConditionStep(step));
+    if (!conditionLocator) throw new Error('element_exists 点击条件缺少条件元素定位');
+    return [`  if (await ${conditionLocator}.count()) await ${locator}.click();`];
+  }
+  return [`  if (await cuecastReadElementState(${locator}) === ${quoteJs(normalized)}) await ${locator}.click();`];
+}
+
+function clickConditionStep(step = {}) {
+  const ref = step.click_condition_ref;
+  const selector = String(step.click_condition_selector || '').trim();
+  const xpath = String(step.click_condition_xpath || '').trim();
+  if (selector || xpath) return { ...step, target_selector: selector, target_xpath: xpath, locator_meta: step.click_condition_locator_meta || null };
+  if (ref && typeof ref === 'object' && !Array.isArray(ref)) {
+    const strategy = String(ref.strategy || ref.type || '').trim().toLowerCase();
+    const value = String(ref.value || ref.locator_value || ref.locatorValue || '').trim();
+    return {
+      ...step,
+      target_selector: strategy === 'css' ? value : String(ref.target_selector || ref.selector || '').trim(),
+      target_xpath: strategy === 'xpath' ? value : String(ref.target_xpath || ref.xpath || '').trim(),
+      locator_meta: ref.locator_meta || null,
+    };
+  }
+  const raw = String(ref || '').trim();
+  if (/^xpath\s*=/i.test(raw)) return { ...step, target_selector: '', target_xpath: raw.replace(/^xpath\s*=\s*/i, '').trim(), locator_meta: null };
+  if (/^css\s*=/i.test(raw)) return { ...step, target_selector: raw.replace(/^css\s*=\s*/i, '').trim(), target_xpath: '', locator_meta: null };
+  return { ...step, target_selector: raw, target_xpath: '', locator_meta: null };
 }
 
 function renderGlobalVariableSet(step, locator, suffix) {
@@ -374,6 +409,31 @@ const PLAYWRIGHT_HELPERS = [
   '    if (effectiveMode === "value") return "value" in node ? node.value : "";',
   '    return typeof node.innerText === "string" ? node.innerText : (node.textContent || "");',
   '  }, readMode);',
+  '}',
+  '',
+  'async function cuecastReadElementState(locator) {',
+  '  await locator.waitFor({ state: "attached" });',
+  '  return locator.evaluate((element) => {',
+  '    const normalize = (value) => String(value ?? "").trim().toLowerCase().replace(/\\s+/g, " ");',
+  '    const state = (value) => {',
+  '      const normalized = normalize(value);',
+  '      if (["true", "1", "on", "open", "opened", "active", "checked", "selected", "enabled", "开启", "打开", "已开启", "选中", "启用"].includes(normalized)) return "on";',
+  '      if (["false", "0", "off", "close", "closed", "inactive", "unchecked", "unselected", "disabled", "关闭", "未开启", "未选中", "禁用"].includes(normalized)) return "off";',
+  '      return "";',
+  '    };',
+  '    const elements = [element, ...element.querySelectorAll("input, [aria-checked], [aria-pressed], [data-state], [data-checked], [data-on], [data-status]")];',
+  '    for (const candidate of elements) {',
+  '      if (typeof candidate.checked === "boolean") return candidate.checked ? "on" : "off";',
+  '      for (const attribute of ["aria-checked", "aria-pressed", "data-state", "data-checked", "data-on", "data-status"]) {',
+  '        const value = state(candidate.getAttribute(attribute));',
+  '        if (value) return value;',
+  '      }',
+  '    }',
+  '    const text = normalize([element.getAttribute("aria-label"), element.getAttribute("title"), element.innerText, element.textContent].filter(Boolean).join(" "));',
+  '    if (/\\b(on|open|opened|active|checked|selected|enabled)\\b|开启|打开|已开启|选中|启用/.test(text)) return "on";',
+  '    if (/\\b(off|close|closed|inactive|unchecked|unselected|disabled)\\b|关闭|未开启|未选中|禁用/.test(text)) return "off";',
+  '    return "unknown";',
+  '  });',
   '}',
   '',
   'function cuecastExtractVariable(rawValue, config) {',

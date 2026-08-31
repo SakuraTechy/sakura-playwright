@@ -93,6 +93,36 @@ export async function runStep(page, testCase, step, options = {}) {
     case 'click': {
       locatorInfo = await resolveStepLocator(page, step, options);
       await showStepAction(page, step, locatorInfo.locator, options);
+      const clickWhen = normalizeClickWhen(step);
+      if (clickWhen === 'element_exists') {
+        const condition = await readClickConditionExists(page, step, options);
+        if (!condition.exists) {
+          extra = {
+            status: 'skipped',
+            skipped: true,
+            skip_reason: 'condition_element_not_found',
+            click_condition: clickWhen,
+            condition_locator: condition.locator,
+            actual_state: 'not_exists',
+            state_source: 'condition_locator',
+          };
+          break;
+        }
+      } else if (clickWhen !== 'always') {
+        // 条件点击在真正触发 click 前读取状态；无法识别时保持不点击，避免误操作开关。
+        const state = await readElementState(locatorInfo.locator, options.timeoutMs);
+        if (state.value !== clickWhen) {
+          extra = {
+            status: 'skipped',
+            skipped: true,
+            skip_reason: `元素状态为 ${state.value}，不满足点击条件 ${clickWhen}`,
+            click_condition: clickWhen,
+            actual_state: state.value,
+            state_source: state.source,
+          };
+          break;
+        }
+      }
       await runLocatorAction(page, locatorInfo, options, () => locatorInfo.locator.click({ timeout: options.timeoutMs }));
       break;
     }
@@ -460,7 +490,7 @@ export async function runStep(page, testCase, step, options = {}) {
     step_id: step.id,
     ...(step.original_step_id != null ? { original_step_id: step.original_step_id } : {}),
     action_type: action,
-    status: 'passed',
+    status: extra.status || 'passed',
     duration_ms: Date.now() - startedAt,
     locator_source: locatorInfo?.source || '',
     locator_type: locatorInfo?.locatorType || '',
@@ -471,6 +501,122 @@ export async function runStep(page, testCase, step, options = {}) {
     ...(operationAssertion ? { operation_assertion: operationAssertion } : {}),
     ...extra,
   };
+}
+
+export function normalizeClickWhen(step = {}) {
+  const raw = firstPresent(step.click_when, step.state_condition, step.clickWhen);
+  if (raw == null || String(raw).trim() === '') return 'always';
+  const value = String(raw).trim().toLowerCase();
+  const aliases = {
+    any: 'always',
+    none: 'always',
+    no_check: 'always',
+    unchecked: 'off',
+    closed: 'off',
+    inactive: 'off',
+    checked: 'on',
+    opened: 'on',
+    active: 'on',
+    exists: 'element_exists',
+    present: 'element_exists',
+    element_present: 'element_exists',
+    if_exists: 'element_exists',
+  };
+  const normalized = aliases[value] || value;
+  if (!['always', 'off', 'on', 'element_exists'].includes(normalized)) {
+    throw new RunnerError('METHOD_CONFIG_INVALID', `不支持的点击条件：${raw}`);
+  }
+  return normalized;
+}
+
+async function readClickConditionExists(page, step, options) {
+  const conditionStep = clickConditionStep(step);
+  if (!hasLocator(conditionStep)) {
+    throw new RunnerError('METHOD_CONFIG_INVALID', 'element_exists 点击条件缺少条件元素定位');
+  }
+  try {
+    await resolveLocator(getActionRoot(page, options), conditionStep, { ...options, allowHidden: true });
+    return {
+      exists: true,
+      locator: conditionLocatorValue(conditionStep),
+    };
+  } catch (error) {
+    if (error?.code === 'LOCATOR_NOT_FOUND') {
+      return { exists: false, locator: conditionLocatorValue(conditionStep) };
+    }
+    throw error;
+  }
+}
+
+function clickConditionStep(step = {}) {
+  const ref = step.click_condition_ref;
+  const directSelector = String(step.click_condition_selector || '').trim();
+  const directXpath = String(step.click_condition_xpath || '').trim();
+  if (directSelector || directXpath) {
+    return {
+      ...step,
+      value: '',
+      description: '',
+      target_selector: directSelector,
+      target_xpath: directXpath,
+      locator_meta: step.click_condition_locator_meta || null,
+    };
+  }
+  if (ref && typeof ref === 'object' && !Array.isArray(ref)) {
+    const strategy = String(ref.strategy || ref.type || '').trim().toLowerCase();
+    const value = String(ref.value || ref.locator_value || ref.locatorValue || '').trim();
+    return {
+      ...step,
+      value: '',
+      description: '',
+      target_selector: strategy === 'css' ? value : String(ref.target_selector || ref.selector || '').trim(),
+      target_xpath: strategy === 'xpath' ? value : String(ref.target_xpath || ref.xpath || '').trim(),
+      locator_meta: ref.locator_meta || null,
+    };
+  }
+  const raw = String(ref || '').trim();
+  if (/^xpath\s*=/i.test(raw)) return { ...step, value: '', description: '', target_selector: '', target_xpath: raw.replace(/^xpath\s*=\s*/i, '').trim(), locator_meta: null };
+  if (/^css\s*=/i.test(raw)) return { ...step, value: '', description: '', target_selector: raw.replace(/^css\s*=\s*/i, '').trim(), target_xpath: '', locator_meta: null };
+  return { ...step, value: '', description: '', target_selector: raw, target_xpath: '', locator_meta: null };
+}
+
+function conditionLocatorValue(step) {
+  return String(step.target_xpath || step.target_selector || '').trim();
+}
+
+export async function readElementState(locator, timeoutMs) {
+  await locator.waitFor({ state: 'attached', timeout: timeoutMs });
+  return locator.evaluate((element) => {
+    const trueValues = new Set(['true', '1', 'on', 'open', 'opened', 'active', 'checked', 'selected', 'enabled', '开启', '打开', '已开启', '选中', '启用']);
+    const falseValues = new Set(['false', '0', 'off', 'close', 'closed', 'inactive', 'unchecked', 'unselected', 'disabled', '关闭', '未开启', '未选中', '禁用']);
+    const normalize = (value) => String(value ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+    const stateFromValue = (value) => {
+      const normalized = normalize(value);
+      if (trueValues.has(normalized)) return 'on';
+      if (falseValues.has(normalized)) return 'off';
+      return '';
+    };
+    const elements = [element, ...element.querySelectorAll('input, [aria-checked], [aria-pressed], [data-state], [data-checked], [data-on], [data-status]')];
+    for (const candidate of elements) {
+      if (typeof candidate.checked === 'boolean') return { value: candidate.checked ? 'on' : 'off', source: 'checked' };
+      for (const attribute of ['aria-checked', 'aria-pressed', 'data-state', 'data-checked', 'data-on', 'data-status']) {
+        const state = stateFromValue(candidate.getAttribute(attribute));
+        if (state) return { value: state, source: attribute };
+      }
+    }
+    const text = normalize([
+      element.getAttribute('aria-label'),
+      element.getAttribute('title'),
+      element.innerText,
+      element.textContent,
+    ].filter(Boolean).join(' '));
+    if (/\b(on|open|opened|active|checked|selected|enabled)\b|开启|打开|已开启|选中|启用/.test(text)) return { value: 'on', source: 'text' };
+    if (/\b(off|close|closed|inactive|unchecked|unselected|disabled)\b|关闭|未开启|未选中|禁用/.test(text)) return { value: 'off', source: 'text' };
+    const className = normalize(elements.map((candidate) => candidate.className || '').join(' '));
+    if (/\b(on|open|opened|active|checked|selected|enabled)\b/.test(className)) return { value: 'on', source: 'class' };
+    if (/\b(off|close|closed|inactive|unchecked|unselected|disabled)\b/.test(className)) return { value: 'off', source: 'class' };
+    return { value: 'unknown', source: 'unknown' };
+  });
 }
 
 export async function waitWithCountdown(durationMs, onCountdown, sleeper = sleep) {

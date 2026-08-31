@@ -87,3 +87,35 @@ test('Pytest 导出保存变量、五种元素断言和 expect 字段', async ()
   });
   assert.equal(syntax.status, 0, syntax.stderr);
 });
+
+test('条件点击导出为状态匹配后才点击', async () => {
+  const testCase = {
+    id: 'conditional-click',
+    start_url: 'http://127.0.0.1:4173/',
+    steps: [{ step_index: 0, action_type: 'click', target_selector: '#switch', click_when: 'off' }],
+  };
+  const playwright = await renderSpec(testCase, config);
+  const pytest = await renderPytest(testCase, config);
+
+  assert.match(playwright, /cuecastReadElementState\(page\.locator\("#switch"\)\) === "off"/);
+  assert.match(pytest, /if cuecast_read_element_state\(page\.locator\("#switch"\)\) == "off":/);
+});
+
+test('条件元素存在时导出为存在性判断后才点击', async () => {
+  const testCase = {
+    id: 'conditional-click-exists',
+    start_url: 'http://127.0.0.1:4173/',
+    steps: [{
+      step_index: 0,
+      action_type: 'click',
+      target_selector: '#switch',
+      click_when: 'element_exists',
+      click_condition_ref: { strategy: 'xpath', value: "(//span[contains(text(),'OFF')])[2]", exact: true },
+    }],
+  };
+  const playwright = await renderSpec(testCase, config);
+  const pytest = await renderPytest(testCase, config);
+
+  assert.ok(playwright.includes('if (await page.locator("xpath=(//span[contains(text(),\'OFF\')])[2]").count()) await page.locator("#switch").click();'));
+  assert.ok(pytest.includes('if page.locator("xpath=(//span[contains(text(),\'OFF\')])[2]").count():'));
+});

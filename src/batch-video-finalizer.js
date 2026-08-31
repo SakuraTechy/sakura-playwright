@@ -21,6 +21,7 @@ async function main() {
   const casesDirectory = path.join(sessionDirectory, 'cases');
   const caseEntries = (await fs.readdir(casesDirectory, { withFileTypes: true }).catch(() => []))
     .filter((entry) => entry.isFile() && entry.name.endsWith('.json'));
+  let failedCount = 0;
   const api = parseBoolean(args['admin-api'] ?? resolveAdminApiEnabled(env), false)
     ? new ApiClient({
         apiBase: trimTrailingSlash(args['api-base'] || resolveAdminApiBase(env)),
@@ -61,11 +62,14 @@ async function main() {
       await writeJson(metadata.result_json, result);
       console.log(`[batch-video] sliced case=${metadata.case_id} output=${outputPath}`);
     } catch (error) {
+      failedCount += 1;
       result.raw = { ...(result.raw || {}), batch_video_error: error?.message || String(error) };
       await writeJson(metadata.result_json, result);
       console.error(`[batch-video] case=${metadata.case_id} failed: ${error?.message || error}`);
     }
   }
+  // 每个用例失败都会被记录，最终仍需用非零退出码通知 Admin 批次切片未完成。
+  if (failedCount > 0) process.exitCode = 1;
 }
 
 function shouldKeepVideo(policy, success) {

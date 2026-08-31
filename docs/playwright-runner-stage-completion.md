@@ -30,6 +30,30 @@
 | M4 | CI 和批量执行 | 通过 | 批量入口、mock 批量 job API、CI 模板已实现并通过本地 mock 验收 |
 | M5 | 高级能力 | 部分通过 | M5-A 至 M5-O 已完成 iframe、文件上传、多文件上传、隐藏上传代理、下载断言、高级下载校验、二进制下载校验、JSON/API、Monaco 输入、Monaco 快捷键、树定位、展开/复选树、多窗口基础切换、多窗口显式切换和关闭、多 popup 选择、网络 mock、类 HAR 回放、请求断言、响应断言、响应快照、快照基线对比、请求数量断言、失败注入专项 case、Playwright/pytest 脚本导出、复杂定位导出、高级动作导出和导出 Playwright 端到端执行并通过 mock 验收 |
 
+## 2026-08-31：条件点击开关状态保护
+
+### 完成情况
+
+| 事项 | 结果 |
+| --- | --- |
+| Admin 操作目录 | “元素点击”新增可选 `click_when`：`always`、`off`、`on`、`element_exists`；选择 `element_exists` 时可填写 `click_condition_ref` 条件元素定位；默认 `always`，历史步骤行为不变 |
+| Playwright Runner | 条件点击在执行真实 click 前读取 `checked`、ARIA、`data-*`、文本和 class 状态；状态不匹配或无法识别时返回 `skipped`，不触发点击 |
+| 导出脚本 | Playwright 与 Pytest 导出保留同等状态判断逻辑 |
+| Selenium/Jenkins 兼容 | 条件透传到旧 `details`，旧链路配置条件时同样保护点击，未配置时保持原行为 |
+
+### 使用方式
+
+在“元素点击”的“点击条件”中选择“关闭时点击”。对于 `OFF` 开关，Runner 识别为 `off` 后执行点击；已经打开或状态无法确认时跳过。推荐目标定位到包含状态属性的开关根元素，例如带 `aria-checked`、`aria-pressed` 或 `data-state` 的元素。
+
+如果页面没有可读取的状态属性，可以选择“指定元素存在时点击”，在“条件元素”中填写 `xpath=(//span[contains(text(),'OFF')])[2]` 或对应 CSS。只有条件元素存在时才会点击目标元素；不存在时步骤记为 `skipped`。
+
+### 验证
+
+- Runner `npm run check`：通过。
+- Runner 条件点击、导出和目录诊断测试：通过。
+- Admin `mvn -pl continew-automation -am -DrunTests=true '-Dtest=AutomationOperationStepAssemblerTest,AutomationOperationStepReverseAdapterTest' '-Dsurefire.failIfNoSpecifiedTests=false' test`：26/26 通过。
+- Selenium `mvn -DskipTests package`：通过。
+
 ## 2026-08-11：Element Message 断言定位一致性修复
 
 ### 完成情况
@@ -730,6 +754,14 @@ M5-A 至 M5-O 十五批高级能力已完成并通过本地 mock 验收；完整
 - Runner 按档位设置设备像素倍率、JPEG 质量和截图间隔；有头最大化模式保持实际浏览器窗口分辨率，避免违反 Playwright 的 `viewport=null` 限制。
 - admin-ui 实时画面轮询调整为 1 秒，关闭查看器后仍会停止轮询并释放 Blob URL；Jenkins 与 Extension CDP 链路不变。
 - 验证通过：Runner `npm run check`、`npm run test:unit`，admin `mvn -pl continew-automation -am -DskipTests compile`，admin-ui `pnpm typecheck`、定向 ESLint 和 `pnpm build:prod`。
+
+### M6 批次视频切片依赖与失败状态修复（2026-08-31）
+
+- Admin Docker 镜像安装 `ffmpeg`，满足 `reuse-browser` 共享录屏按用例切片的运行时依赖。
+- `batch-video-finalizer.js` 统计用例切片失败数并以非零退出码结束，避免包含 `spawn ffmpeg ENOENT` 的 finalizer 被 Admin 记录为“完成”。
+- 新增 finalizer 回归测试，覆盖 `--ffmpeg-path` 指向不存在可执行文件时的失败结果和退出码。
+
+验证：Runner `npm run check`、`npm run test:unit`。本机 Docker CLI 无法连接 Linux engine，未执行 Dockerfile 校验、镜像构建及真实 Admin 容器端到端批次回放。
 
 ### M6 CueCast 录制变量与元素断言适配（2026-08-07）
 

@@ -258,6 +258,64 @@ test('hidden Element-style checkbox is promoted to its visible label', async () 
   await page.close();
 });
 
+test('CueCast CDP click promotes a same-level label for hidden table checkbox', async () => {
+  const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
+  await page.setContent(`
+    <style>
+      .cell { width: 50px; height: 30px; }
+      .header-center { display: inline-block; width: 18px; height: 18px; }
+      input.header-center { display: none; }
+      label.checkbox-inner { border: 1px solid #999; }
+    </style>
+    <table class="el-table"><thead><tr><th><div class="cell"><div class="header-center header-frist-child">
+      <input type="checkbox" id="1-select-all" class="header-center">
+      <label for="1-select-all" class="header-center checkbox-inner"></label>
+    </div></div></th></tr></thead></table>
+  `);
+
+  const selector = '.el-table:nth-of-type(1) thead > tr:nth-of-type(1) > th:nth-of-type(1) div.cell > div.header-center.header-frist-child > input.header-center';
+  const expression = PlayerManager.prototype._buildFindCode.call({}, selector, '//*[@id="1-select-all"]');
+  const box = await page.evaluate(expression);
+
+  assert.equal(box.ok, true);
+  assert.equal(box.hitOk, true);
+  const checkbox = page.locator('input[id="1-select-all"]');
+  assert.equal(await checkbox.isChecked(), false);
+  await page.mouse.click(box.x, box.y);
+  assert.equal(await checkbox.isChecked(), true);
+  await page.close();
+});
+
+test('CueCast CDP click waits for a temporary covering mask to disappear', async () => {
+  const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
+  await page.setContent(`
+    <style>
+      #target, #cover { position: fixed; left: 20px; top: 20px; width: 140px; height: 40px; }
+      #target { z-index: 1; }
+      #cover { z-index: 2; background: rgba(0, 0, 0, 0.2); }
+    </style>
+    <button id="target">扩展配置</button><div id="cover"></div>
+    <script>setTimeout(() => document.getElementById('cover').remove(), 220);</script>
+  `);
+
+  const cdpSession = await page.context().newCDPSession(page);
+  const startedAt = Date.now();
+  const result = await PlayerManager.prototype._getElementBoxResult.call({
+    _buildFindCode: PlayerManager.prototype._buildFindCode.bind({}),
+    _getEffectiveWaitTimeout: () => 1000,
+    _isPageLoadingUi: async () => false,
+    _throwIfPageError: async () => {},
+    _sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    _cdpSend: (_tabId, method, params) => cdpSession.send(method, params),
+  }, 1, '#target', '', '', 1000, false, null, true);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.box.hitOk, true);
+  assert.equal(Date.now() - startedAt >= 200, true);
+  await cdpSession.detach();
+  await page.close();
+});
+
 test('hidden file input is accepted for certificate upload', async () => {
   const page = await browser.newPage();
   await page.setContent(`

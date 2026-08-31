@@ -92,6 +92,57 @@ test('legacy locator assertion failure preserves the selected locator', async ()
   );
 });
 
+test('conditional click only clicks when the requested element state matches', async () => {
+  let offClicks = 0;
+  let onClicks = 0;
+  let unknownClicks = 0;
+  const page = new FakePage({
+    '#off': new FakeLocator({ tag: 'button', attributes: { 'aria-checked': 'false' }, onClick: () => { offClicks += 1; } }),
+    '#on': new FakeLocator({ tag: 'button', attributes: { 'aria-checked': 'true' }, onClick: () => { onClicks += 1; } }),
+    '#unknown': new FakeLocator({ tag: 'button', onClick: () => { unknownClicks += 1; } }),
+  });
+  const browserContext = createBrowserActionContext();
+
+  const clicked = await runStep(page, testCase, {
+    id: 'CLICK_OFF', step_index: 0, action_type: 'click', target_selector: '#off', click_when: 'off',
+  }, stepOptions(browserContext));
+  const skippedOn = await runStep(page, testCase, {
+    id: 'CLICK_ON', step_index: 1, action_type: 'click', target_selector: '#on', click_when: 'off',
+  }, stepOptions(browserContext));
+  const skippedUnknown = await runStep(page, testCase, {
+    id: 'CLICK_UNKNOWN', step_index: 2, action_type: 'click', target_selector: '#unknown', click_when: 'off',
+  }, stepOptions(browserContext));
+
+  assert.equal(clicked.status, 'passed');
+  assert.equal(skippedOn.status, 'skipped');
+  assert.equal(skippedOn.actual_state, 'on');
+  assert.equal(skippedUnknown.status, 'skipped');
+  assert.equal(skippedUnknown.actual_state, 'unknown');
+  assert.equal(offClicks, 1);
+  assert.equal(onClicks, 0);
+  assert.equal(unknownClicks, 0);
+});
+
+test('conditional click can require a configured element to exist', async () => {
+  let clicks = 0;
+  const page = new FakePage({
+    '#target': new FakeLocator({ tag: 'button', onClick: () => { clicks += 1; } }),
+    "xpath=(//span[contains(text(),'OFF')])[2]": new FakeLocator({ tag: 'span', text: 'OFF' }),
+  });
+  const browserContext = createBrowserActionContext();
+  const result = await runStep(page, testCase, {
+    id: 'CLICK_EXISTS',
+    step_index: 0,
+    action_type: 'click',
+    target_selector: '#target',
+    click_when: 'element_exists',
+    click_condition_ref: { strategy: 'xpath', value: "(//span[contains(text(),'OFF')])[2]", exact: true },
+  }, stepOptions(browserContext));
+
+  assert.equal(result.status, 'passed');
+  assert.equal(clicks, 1);
+});
+
 test('frame stack, pre-armed dialog and close-all-page actions retain browser-only safety boundaries', async () => {
   const page = new FakePage();
   const childFrame = new FakeFrame('http://example.test/frame', page.mainFrame());
@@ -263,11 +314,16 @@ class FakeLocator {
       tagName: this.tag.toUpperCase(),
       className: '',
       isContentEditable: false,
+      innerText: this.text,
+      textContent: this.text,
       closest: () => null,
       getAttribute: (name) => this.attributes[name] ?? null,
       querySelector: () => null,
+      querySelectorAll: () => [],
     }, argument);
   }
+
+  async waitFor() {}
 
   async click() {
     await this.onClick?.();

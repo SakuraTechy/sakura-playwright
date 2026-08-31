@@ -69,7 +69,7 @@ test('所有目录 form_schema 字段都进入 Playwright 执行详情', () => {
       fieldCount += method.form_schema.length;
     }
   }
-  assert.equal(fieldCount, 125);
+  assert.equal(fieldCount, 127);
 });
 
 test('统一执行详情同时保留配置值和变量解析后的安全值', () => {
