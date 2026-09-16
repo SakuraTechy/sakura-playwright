@@ -10,7 +10,7 @@ import {
 
 test('canonical registry reports every action currently dispatched by the Playwright Runner', () => {
   assert.deepEqual([...PLAYWRIGHT_ACTION_TYPES].sort(), [
-    'assert_attribute', 'assert_database_value', 'assert_download', 'assert_element_match', 'assert_json', 'assert_request', 'assert_request_count', 'assert_response',
+    'assert_attribute', 'assert_database_value', 'assert_download', 'assert_download_existing', 'assert_element_match', 'assert_json', 'assert_request', 'assert_request_count', 'assert_response',
     'assert_script', 'assert_text', 'assert_text_not', 'assert_text_regex', 'assert_variable_list',
     'assert_variable_list_not', 'captcha_ocr', 'certificate_upload', 'clear', 'click',
     'click_open_page', 'close_all_pages', 'close_page', 'combo_select', 'database_native', 'database_sql',

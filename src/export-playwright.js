@@ -46,6 +46,8 @@ export async function renderSpec(testCase, config) {
     '  let page = initialPage;',
     '  const cuecastPages = [page];',
     '  const cuecastVariables = {};',
+    '  const cuecastDownloads = [];',
+    '  page.on(\'download\', (download) => cuecastDownloads.push(download));',
     `  const apiBase = process.env.SAKURA_ADMIN_API_BASE || process.env.CUECAST_API_BASE || ${quoteJs(config.apiBase)};`,
     `  const startUrl = process.env.CUECAST_START_URL || ${quoteJs(testCase.start_url)};`,
     '  const networkEvents = [];',
@@ -122,6 +124,8 @@ function renderStep(prepared) {
       return renderFileUpload(locator, value);
     case 'assert_download':
       return [`  await cuecastAssertDownload(page, ${locator}, ${jsValue(parseJsonLoose(value))});`];
+    case 'assert_download_existing':
+      return [`  await cuecastAssertExistingDownload(cuecastDownloads, ${jsValue(parseJsonLoose(value))});`];
     case 'assert_json':
       return renderAssertJson(step, locator, suffix);
     case 'assert_request':
@@ -228,7 +232,7 @@ function renderElementMatch(step, locator, suffix) {
   const actualName = `cuecastAssertionActual${suffix}`;
   const expectedName = `cuecastAssertionExpected${suffix}`;
   const lines = [
-    `  const ${actualName} = String(await cuecastReadElementValue(${locator}, ${quoteJs(step.read_mode || 'auto')}));`,
+    `  const ${actualName} = String(await cuecastReadElementValue(${locator}, ${quoteJs(step.read_mode || 'auto')}, ${quoteJs(step.attribute || '')}));`,
     `  const ${expectedName} = ${renderRuntimeString(step.expect ?? step.value ?? '')};`,
   ];
   if (matchMode === 'contains') lines.push(`  expect(${actualName}).toContain(${expectedName});`);
@@ -400,15 +404,39 @@ function escapeComment(value) {
 }
 
 const PLAYWRIGHT_HELPERS = [
-  'async function cuecastReadElementValue(locator, rawReadMode) {',
+  'async function cuecastReadElementValue(locator, rawReadMode, rawAttribute) {',
   '  const readMode = String(rawReadMode || "auto").toLowerCase();',
+  '  const attribute = String(rawAttribute || "").trim();',
+  '  if (!["auto", "text", "attribute", "value"].includes(readMode)) throw new Error(`Unsupported element read_mode: ${readMode}`);',
+  '  if (readMode === "attribute" && !attribute) throw new Error("元素属性断言缺少属性名");',
   '  await locator.waitFor({ state: "attached" });',
-  '  return locator.evaluate((node, mode) => {',
+  '  const result = await locator.evaluate((node, payload) => {',
+  '    const mode = payload.mode;',
   '    const tagName = String(node.tagName || "").toLowerCase();',
   '    const effectiveMode = mode === "auto" && ["input", "textarea", "select"].includes(tagName) ? "value" : mode;',
   '    if (effectiveMode === "value") return "value" in node ? node.value : "";',
-  '    return typeof node.innerText === "string" ? node.innerText : (node.textContent || "");',
-  '  }, readMode);',
+  '    if (effectiveMode === "attribute") {',
+  '      let attributePresent = node.hasAttribute(payload.attribute);',
+  '      let value = "";',
+  '      if (!attributePresent && payload.attribute) {',
+  '        const attrLower = payload.attribute.toLowerCase();',
+  '        if (attrLower === "src") { value = node.currentSrc || node.src || ""; if (value) attributePresent = true; }',
+  '        else if (attrLower === "href") { value = node.href || ""; if (value) attributePresent = true; }',
+  '        else if (attrLower === "checked" && typeof node.checked === "boolean") { value = String(node.checked); attributePresent = true; }',
+  '        else if (attrLower === "disabled" && typeof node.disabled === "boolean") { value = String(node.disabled); attributePresent = true; }',
+  '        else if (attrLower === "readonly" && typeof node.readOnly === "boolean") { value = String(node.readOnly); attributePresent = true; }',
+  '        else if (attrLower === "selected" && typeof node.selected === "boolean") { value = String(node.selected); attributePresent = true; }',
+  '        else if (attrLower === "aria-checked") { value = node.getAttribute("aria-checked") || ""; if (value) attributePresent = true; }',
+  '        else if (attrLower === "aria-disabled") { value = node.getAttribute("aria-disabled") || ""; if (value) attributePresent = true; }',
+  '      }',
+  '      if (!attributePresent) return { attribute_present: false, value: "" };',
+  '      if (!value) value = node.getAttribute(payload.attribute) || "";',
+  '      return { attribute_present: true, value };',
+  '    }',
+  '    return { attribute_present: true, value: typeof node.innerText === "string" ? node.innerText : (node.textContent || "") };',
+  '  }, { mode: readMode, attribute });',
+  '  if (readMode === "attribute" && result.attribute_present !== true) throw new Error(`目标元素不存在属性：${attribute}`);',
+  '  return result?.value ?? result ?? "";',
   '}',
   '',
   'async function cuecastReadElementState(locator) {',
@@ -744,6 +772,24 @@ const PLAYWRIGHT_HELPERS = [
   '  if (expected.maxBytes != null) expect(stat.size).toBeLessThanOrEqual(Number(expected.maxBytes));',
   '  if (expected.mime) expect(cuecastGuessMimeType(savePath).toLowerCase()).toContain(String(expected.mime).toLowerCase());',
   '  if (expected.contains) expect(fs.readFileSync(savePath, \'utf8\')).toContain(expected.contains);',
+  '  if (expected.sha256) expect(cuecastFileSha256(savePath)).toBe(String(expected.sha256).toLowerCase());',
+  '}',
+  '',
+  'async function cuecastAssertExistingDownload(downloads, config) {',
+  '  const expected = cuecastDownloadExpected(config);',
+  '  const download = [...downloads].reverse().find((item) => !expected.filename || item.suggestedFilename().toLowerCase().includes(expected.filename.toLowerCase()));',
+  '  if (!download) throw new Error("没有找到可校验的浏览器下载文件");',
+  '  const filename = download.suggestedFilename();',
+  '  const downloadDir = path.resolve(process.cwd(), "test-results", "cuecast-downloads");',
+  '  fs.mkdirSync(downloadDir, { recursive: true });',
+  '  const savePath = path.join(downloadDir, cuecastSanitizeFilename(filename || `download-${Date.now()}`));',
+  '  await download.saveAs(savePath);',
+  '  const stat = fs.statSync(savePath);',
+  '  if (expected.filename) expect(filename).toContain(expected.filename);',
+  '  if (expected.minBytes != null) expect(stat.size).toBeGreaterThanOrEqual(Number(expected.minBytes));',
+  '  if (expected.maxBytes != null) expect(stat.size).toBeLessThanOrEqual(Number(expected.maxBytes));',
+  '  if (expected.mime) expect(cuecastGuessMimeType(savePath).toLowerCase()).toContain(String(expected.mime).toLowerCase());',
+  '  if (expected.contains) expect(fs.readFileSync(savePath, "utf8")).toContain(expected.contains);',
   '  if (expected.sha256) expect(cuecastFileSha256(savePath)).toBe(String(expected.sha256).toLowerCase());',
   '}',
   '',

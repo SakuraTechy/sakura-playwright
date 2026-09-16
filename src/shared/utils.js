@@ -59,6 +59,9 @@ export function parseArgs(argv = process.argv.slice(2), env = process.env) {
     browserSessionEndpoint: mergedEnv.SAKURA_PLAYWRIGHT_BROWSER_SESSION_ENDPOINT || '',
     storageState: args['storage-state'] || mergedEnv.RUNNER_STORAGE_STATE || mergedEnv.CUECAST_STORAGE_STATE || '',
     storageStateOut: args['storage-state-out'] || '',
+    // 场景变量文件仅由 Admin 托管进程注入，不开放前端参数或 .env 复用入口。
+    variableStateInput: env.SAKURA_PLAYWRIGHT_VARIABLE_STATE_IN || '',
+    variableStateOutput: env.SAKURA_PLAYWRIGHT_VARIABLE_STATE_OUT || '',
     locatorMode: args['locator-mode'] || mergedEnv.RUNNER_LOCATOR_MODE || 'legacy',
     slowMoMs: parseIntegerInRange(args['slow-mo'] ?? mergedEnv.RUNNER_SLOW_MO_MS, 0, 0, 10000, 'slow-mo'),
     finishDelayMs: parseIntegerInRange(args['finish-delay'] ?? mergedEnv.RUNNER_FINISH_DELAY_MS, 0, 0, 600000, 'finish-delay'),

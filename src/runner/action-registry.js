@@ -40,6 +40,7 @@ export const PLAYWRIGHT_ACTION_REGISTRY = Object.freeze([
   { actionType: 'certificate_upload', execution: 'browser' },
   { actionType: 'clear', execution: 'browser' },
   { actionType: 'assert_download', execution: 'browser' },
+  { actionType: 'assert_download_existing', execution: 'browser' },
   { actionType: 'assert_json', execution: 'browser' },
   { actionType: 'assert_request', execution: 'browser' },
   { actionType: 'assert_response', execution: 'browser' },

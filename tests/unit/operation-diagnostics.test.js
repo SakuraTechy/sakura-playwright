@@ -69,7 +69,7 @@ test('所有目录 form_schema 字段都进入 Playwright 执行详情', () => {
       fieldCount += method.form_schema.length;
     }
   }
-  assert.equal(fieldCount, 127);
+  assert.equal(fieldCount, 147);
 });
 
 test('统一执行详情同时保留配置值和变量解析后的安全值', () => {
@@ -176,6 +176,26 @@ test('Playwright 操作输入保留超过 512 字符的完整配置值和执行�
 
   assert.equal(target.configured.preview, longValue);
   assert.equal(target.effective.preview, longValue);
+});
+
+test('Playwright 断言诊断完整保留 data URL 的期望值和实际值', () => {
+  const dataUrl = `data:image/jpg;base64,${'a'.repeat(2048)}`;
+  const operation = buildOperationDiagnostic(
+    { action_type: 'assert_element_match', expect: dataUrl },
+    { action_type: 'assert_element_match', expect: dataUrl },
+    {
+      action_type: 'assert_element_match',
+      status: 'passed',
+      operation_assertion: {
+        expected: { value_state: 'visible', preview: dataUrl },
+        actual: { value_state: 'visible', preview: dataUrl },
+        passed: true,
+      },
+    },
+  );
+
+  assert.equal(operation.outcome.assertion.expected.preview, dataUrl);
+  assert.equal(operation.outcome.assertion.actual.preview, dataUrl);
 });
 
 test('统一执行详情不回显敏感值和受限脚本命令', () => {

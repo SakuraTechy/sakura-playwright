@@ -185,6 +185,38 @@ export class ApiClient {
     }
   }
 
+  async downloadExecutionFile(downloadPath, targetPath) {
+    this.requireAdminApi('download execution file');
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.max(this.timeoutMs, 120000));
+    const headers = {};
+    if (this.token) headers.Authorization = !/^Bearer\s+/i.test(this.token) ? `Bearer ${this.token}` : this.token;
+    if (this.executionCapability) headers['X-Execution-Capability'] = this.executionCapability;
+    try {
+      const bases = [this.apiBase];
+      if (/\/api$/i.test(this.apiBase)) bases.push(this.apiBase.slice(0, -4));
+      for (let index = 0; index < bases.length; index += 1) {
+        const res = await fetch(this.buildRequestUrl(bases[index], downloadPath), {
+          method: 'GET', headers, signal: controller.signal,
+        });
+        if (!res.ok) {
+          if (res.status === 404 && index < bases.length - 1) continue;
+          throw new RunnerError('INFRA_FILE_DOWNLOAD_FAILED', `执行文件下载失败，HTTP状态=${res.status}`);
+        }
+        await fs.promises.writeFile(targetPath, Buffer.from(await res.arrayBuffer()));
+        return targetPath;
+      }
+      throw new RunnerError('INFRA_FILE_DOWNLOAD_FAILED', '执行文件下载接口不存在');
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        throw new RunnerError('INFRA_FILE_DOWNLOAD_FAILED', `执行文件下载超时：${downloadPath}`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async pushLiveFrame(jobId, frame) {
     if (!this.adminApi || !jobId) return null;
     const controller = new AbortController();

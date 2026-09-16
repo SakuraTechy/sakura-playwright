@@ -1,4 +1,5 @@
 const FOCUS_SCALE = 1.75;
+const PREVIEW_TIMEOUT_MS = 1000;
 const RESET_FOCUS_ACTIONS = new Set(['navigate', 'switch_page', 'close_page']);
 const POINTER_ACTIONS = new Set([
   'click',
@@ -44,6 +45,7 @@ const ACTION_NAMES = Object.freeze({
   certificate_upload: '上传证书',
   clear: '清空输入',
   assert_download: '下载并校验',
+  assert_download_existing: '校验已下载文件',
   assert_json: '校验 JSON',
   assert_request: '校验请求',
   assert_response: '校验响应',
@@ -70,21 +72,24 @@ const ACTION_NAMES = Object.freeze({
  */
 export async function showStepAction(page, step, locator, options = {}) {
   if (typeof options.onActionPreview !== 'function') return;
+  if (!page || page.isClosed?.()) return;
+  const timeout = Math.min(options.timeoutMs || PREVIEW_TIMEOUT_MS, PREVIEW_TIMEOUT_MS);
 
   if (locator) {
-    await locator.scrollIntoViewIfNeeded({ timeout: options.timeoutMs }).catch(() => {});
+    await locator.scrollIntoViewIfNeeded({ timeout }).catch(() => {});
   }
 
-  const target = locator || page.locator('body');
+  // PDF / 导航中页面可能没有 body，装饰性绘制不能消耗默认的 30 秒定位等待。
+  const target = locator || page.locator(':root');
   const rendered = await target.evaluate(renderActionCanvas, {
     highlightTarget: Boolean(locator),
-  }).then(() => true).catch((error) => {
+  }, { timeout }).then(() => true).catch((error) => {
     options.onActionPreviewError?.(error);
     return false;
   });
 
-  if (!rendered) return;
-  const boundingBox = locator ? await locator.boundingBox().catch(() => null) : null;
+  // 绘制失败仍发布目标页原始画面，不把上一窗口的截图留在实时面板。
+  const boundingBox = rendered && locator ? await locator.boundingBox({ timeout }).catch(() => null) : null;
   const viewport = page.viewportSize?.() || await page.evaluate(() => ({
     width: window.innerWidth,
     height: window.innerHeight,

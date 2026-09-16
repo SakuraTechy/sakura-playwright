@@ -36,6 +36,7 @@ const ACTION_PROFILES = Object.freeze({
   assert_text_regex: 'assertion',
   assert_element_match: 'assertion',
   assert_download: 'assertion',
+  assert_download_existing: 'assertion',
   assert_json: 'assertion',
   assert_request: 'assertion',
   assert_response: 'assertion',
@@ -95,6 +96,7 @@ const ACTION_INPUTS = Object.freeze({
   assert_text_regex: ['target_ref', 'regex'],
   assert_element_match: ['target_ref', 'read_mode', 'match_mode', 'expect'],
   assert_download: ['target_ref', 'value'],
+  assert_download_existing: ['value'],
   assert_json: ['value', 'expect'],
   assert_request: ['target_ref', 'value'],
   assert_response: ['target_ref', 'value'],
@@ -158,6 +160,8 @@ const ACTION_SUMMARIES = Object.freeze({
   assert_variable_list_not: '变量列表反向检查通过',
   assert_text_regex: '正则检查通过',
   assert_element_match: '元素检查通过',
+  assert_download: '下载文件检查通过',
+  assert_download_existing: '已下载文件检查通过',
   wait: '固定等待完成',
   implicit_wait: '隐式等待配置完成',
   captcha_ocr: '验证码识别完成',
@@ -426,7 +430,7 @@ function buildAssertionDiagnostic(actionType, definitionStep, runtimeStep, resul
   const explicit = result.operation_assertion;
   if (explicit && typeof explicit === 'object') return sanitizeAssertion(explicit);
   const details = result.details && typeof result.details === 'object' ? result.details : {};
-  if (actionType === 'assert_download') {
+  if (actionType === 'assert_download' || actionType === 'assert_download_existing') {
     return buildDownloadAssertionDiagnostic(definitionStep, runtimeStep, result, details);
   }
   const expected = firstValue(
@@ -519,7 +523,8 @@ function sanitizeAssertion(assertion) {
     if (assertion[key] && typeof assertion[key] === 'object') {
       const state = String(assertion[key].value_state || 'visible');
       result[key] = state === 'visible' || state === 'truncated'
-        ? { value_state: state, ...(assertion[key].preview != null ? { preview: safeText(assertion[key].preview) } : {}) }
+        // 断言值是执行判定事实，data URL 等长文本不能在 Runner 侧被截断。
+        ? { value_state: state, ...(assertion[key].preview != null ? { preview: fullText(assertion[key].preview) } : {}) }
         : { value_state: state };
     }
   }

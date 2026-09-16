@@ -84,18 +84,31 @@ function adaptRecordedAssertion(step) {
       `CueCast 元素断言不支持匹配方式：${matchMode || '(空)'}`,
     );
   }
-  const source = String(locatorMeta.context?.assertion?.source || 'auto').trim().toLowerCase();
+  const contextAssertion = locatorMeta.context?.assertion && typeof locatorMeta.context.assertion === 'object'
+    ? locatorMeta.context.assertion
+    : {};
+  const source = String(contextAssertion.source || 'auto').trim().toLowerCase();
   const readMode = source === 'contenteditable' ? 'text' : source;
-  if (!['auto', 'text', 'value'].includes(readMode)) {
+  if (!['auto', 'text', 'attribute', 'value'].includes(readMode)) {
     throw recordedStepError(
       'RECORDED_ASSERTION_SOURCE_UNSUPPORTED',
       step,
       `CueCast 元素断言不支持读取来源：${source || '(空)'}`,
     );
   }
-  const expected = matchMode === 'visible' ? '' : String(step.value ?? '');
+  // 录制事实保存在 expect；value 只是旧格式兼容字段，不能覆盖较长的属性断言值。
+  const expected = matchMode === 'visible' ? '' : firstNonBlankText(
+    step.expect,
+    step.expected,
+    step.value,
+    contextAssertion.preview,
+  );
   if (matchMode !== 'visible' && !expected) {
     throw recordedStepError('RECORDED_ASSERTION_EXPECT_MISSING', step, 'CueCast 元素断言缺少期望值');
+  }
+  const attribute = String(contextAssertion.attribute || step.attribute || '').trim();
+  if (readMode === 'attribute' && !attribute) {
+    throw recordedStepError('RECORDED_ASSERTION_ATTRIBUTE_MISSING', step, 'CueCast 元素属性断言缺少属性名');
   }
   return {
     ...step,
@@ -103,9 +116,19 @@ function adaptRecordedAssertion(step) {
     original_action_type: 'assert_text',
     recording_source: RECORDING_SOURCE,
     read_mode: readMode,
+    ...(readMode === 'attribute' ? { attribute } : {}),
     match_mode: matchMode,
     expect: expected,
   };
+}
+
+function firstNonBlankText(...values) {
+  for (const value of values) {
+    if (value == null) continue;
+    const text = String(value);
+    if (text.trim()) return text;
+  }
+  return '';
 }
 
 function parseLocatorMeta(value, step, required) {

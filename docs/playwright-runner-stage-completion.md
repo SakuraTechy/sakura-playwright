@@ -1,5 +1,14 @@
 # Playwright Runner 阶段完成情况
 
+## 2026-09-08 Shell 结果变量回归
+
+- 已实现 Admin/Agent 的 Shell 标准输出正则替换及变量绑定，Runner 生产消费逻辑复用 `_runtime_variables → VariableContext`；本专项未修改 CueCast 扩展。
+- 新增 `tests/integration/server-shell-variables.test.js`：通过标准输入调用真实 Java 后处理程序，再用真实 Runner/Chromium 验证普通字符串、空结果、敏感变量、失败继续和失败停止；另调用现有 CDP PlayerManager 验证变量消费。Admin HTTP 使用本地模拟接口，不是生产服务联调。
+- `npm run check` 和基础设施/变量/目录定向单测 19/19 通过；与既有 `scene-variables.test.js` 一起执行时共 11/11 通过。
+- 产物：`artifacts/server-shell-variables/run-XdvHwl/`、`artifacts/scene-variables-regression/run-dvoCAK/`；后续重跑使用新 run 目录，保留历史产物。
+- 依赖准备：在 `../sakura-execution-agent` 运行 `mvn -DskipTests=true test-compile org.apache.maven.plugins:maven-dependency-plugin:3.7.0:build-classpath "-Dmdep.outputFile=target/shell-result-test-classpath.txt"`；再运行 `node --test tests/integration/server-shell-variables.test.js tests/integration/scene-variables.test.js`。
+- 状态 `[~]`：代码和本地回归已完成；真实 Linux、已安装扩展和 Jenkins 需指定测试环境后联调。完整记录见[第 20 号方案](<../../docs/20.服务器 Shell 命令结果正则替换并保存全局变量修改方案（待执行）.md>) 第 11 节。
+
 本文档用于记录 `docs/playwright-runner-hybrid-implementation.md` 中每个阶段的完成情况，方便把计划方案与实际落地逐项对比。
 
 维护规则：
@@ -29,6 +38,80 @@
 | M3 | 报告和中台集成 | 部分通过 | 本地报告、artifact 管理、mock 中台 Runner job 已通过 |
 | M4 | CI 和批量执行 | 通过 | 批量入口、mock 批量 job API、CI 模板已实现并通过本地 mock 验收 |
 | M5 | 高级能力 | 部分通过 | M5-A 至 M5-O 已完成 iframe、文件上传、多文件上传、隐藏上传代理、下载断言、高级下载校验、二进制下载校验、JSON/API、Monaco 输入、Monaco 快捷键、树定位、展开/复选树、多窗口基础切换、多窗口显式切换和关闭、多 popup 选择、网络 mock、类 HAR 回放、请求断言、响应断言、响应快照、快照基线对比、请求数量断言、失败注入专项 case、Playwright/pytest 脚本导出、复杂定位导出、高级动作导出和导出 Playwright 端到端执行并通过 mock 验收 |
+
+## 2026-09-08：Admin 同场景跨用例变量传递修复
+
+状态：代码修复、本地真实浏览器及定向回归通过；原产品环境尚未部署复验，整体接入阶段仍保留 `[~]`。
+
+### 根因与变更
+
+原批次 `20260908110317` 的 `SCENE_CASE_003` 已成功保存 `passwd`，`SCENE_CASE_004` 却报 `VARIABLE_NOT_FOUND`。两条原始结果的实际会话模式均为 `reuse-browser`，但每个用例由独立 Runner 进程执行，原实现每次只读取用例初始值创建 `VariableContext`，没有跨进程变量通道。
+
+- `src/runner/variable-state.js`、`variable-context.js`：增加包含作用域、原始值、敏感标记和来源的私有快照，加载时校验批次、场景、环境；前序成功值覆盖初始默认值，损坏状态或范围不匹配明确失败，异常不包含敏感值或文件路径。
+- `src/index.js`、`src/shared/utils.js`：仅通过 Admin 注入的进程环境加载/生成候选，正常成功后保存；失败和超时不生成新候选。浏览器会话模式与变量共享独立。
+- Admin `AutomationPlaywrightSessionStateService`：在既有临时根目录下按批次、环境、场景管理变量文件，保留浏览器认证文件的原路径，复用原子提交和批次清理机制。
+- Admin `AutomationPlaywrightRunnerJobServiceImpl`：所有托管批次校验归属和环境，并串行启动；进程成功、结果回传成功且未取消后才提交变量。失败/取消候选被丢弃，批次终态沿用已有资源清理。
+- 新增 `tests/unit/variable-state.test.js`、`tests/integration/scene-variables.test.js`，扩展后端会话文件与 Job 测试，增加 `npm run test:scene-variables` 和新模块语法检查。
+
+### 验证结果
+
+- 修复前，三种会话模式均复现“前序用例通过、后续用例 `VARIABLE_NOT_FOUND: passwd`”；复现产物 `artifacts/scene-variables-regression/run-GcfLzZ/`。
+- `npm run check`：通过。
+- `npm run test:scene-variables`：4/4 通过（总测试及三种模式子测试）；每种模式均由两个真实 Runner 进程完成“读取元素保存密码 → 输入密码 → 页面断言”，并确认脱敏标记、来源和结果/日志不泄露。最终产物 `artifacts/scene-variables-regression/run-Yml3VS/`。
+- `node --test tests/unit/variable-context.test.js tests/unit/variable-state.test.js tests/unit/global-variable-actions.test.js`：20/20 通过，覆盖数据类型、嵌套引用、默认值优先级、禁止覆盖、跨范围隔离、损坏文件和临时文件清理。
+- `npm run test:session`：3/3 通过；`npm run test:locator`：24/24 通过；`npm run test:export`：1/1 通过。
+- `npm run test:unit`：109/110 通过。唯一失败仍为既有 `operation-diagnostics.test.js:72` 的目录固定字段数断言 `133 !== 127`；本轮没有修改目录或该测试，不记为全量通过。
+- Admin：`mvn -pl continew-automation -am -DrunTests=true "-Dtest=AutomationPlaywrightSessionStateServiceTest,AutomationPlaywrightRunnerJobServiceImplTest,AutomationPlaywrightCaseServiceImplTest,PlaywrightRecordingAssemblerTest,AutomationPlaywrightStepExtractorTest,PlaywrightActionMappingTest" "-Dsurefire.failIfNoSpecifiedTests=false" "-Dspotless.skip=true" "-Dspotless.apply.skip=true" test`：70/70 通过，覆盖成功/失败/回传失败/取消提交条件、文件范围、清理、原始 step/定位元数据及截图降级契约。
+- Admin：`mvn -pl continew-automation -am -DskipTests "-Dspotless.skip=true" "-Dspotless.apply.skip=true" compile`：5 个 reactor 模块编译通过，未触发格式化。
+
+### 部署与人工验收
+
+需要同时更新 Admin 后端与 Runner，并按原启动方式重启 Admin，再在原场景发起新批次按顺序执行 003/004；有前置条件时执行完整场景。旧批次内已丢失的变量不从日志或报告反推。详细步骤见操作手册“同一场景跨用例变量”及工作区 `docs/sakura-playwright-recording-admin-stage4-manual-verification.md` 第 6.2 节。
+
+本轮没有重启当前 Admin 或运行原产品用例，也未改动 `sakura-cuecast`、admin-ui、数据库结构、Jenkins 默认入口、原始 `playwright_step` 或 `locator_meta`；既有暂存改动完整保留。独立 CLI、旧 `batch.js`/Jenkins 与导出脚本仍保持原有变量隔离策略。
+
+## 2026-09-07：PDF 帮助手册断言、等待耗时与切页实时画面修复
+
+状态：代码与本地真实浏览器回归通过；原产品环境复跑待恢复 Admin 服务后执行，不升级整体接入阶段的验收状态。
+
+### 修复范围
+
+- `src/index.js`、`src/browser-session-host.js`：独立 Runner 和共享宿主均使用完整 Chromium，保留无头模式的 PDF Viewer，避免 PDF 被当作下载后停在空窗口。
+- `src/runner/step-runner.js`：空 `switch_page.value` 按最新窗口解释，切页后的预览使用目标窗口；指定 PDF XPath 可在当前窗口的内部 frame / Shadow DOM 中读取真实元素属性，等待内部 frame 延迟加载。原始 step 和 `locator_meta` 不变，不以历史下载或其他窗口的 PDF 伪造断言通过。
+- `src/runner/action-visualizer.js`：无元素定位时使用 `:root`，装饰性定位最多等待 1 秒；即使绘制失败也发布目标窗口原始画面，避免缺少 `body` 的页面额外阻塞约 30 秒。
+- `src/runner/live-frame-publisher.js`：截图最多等待 3 秒；旧帧处理中触发切页，后续强制帧仍拍指定的新窗口。预览回调及时更新 Runner 活动页面。
+- 单元测试及 `tests/integration/pdf-viewer.test.js`：增加真实 CLI / batch、模拟 Admin 回传和实时 JPEG 验证；未知模拟接口返回错误，完整核对 8 个步骤，防止空用例假通过。
+
+### 实测结果
+
+本地 Windows、Playwright Chromium、临时模拟 Admin API，保持“输入 → Tab → 输入 → 登录 → 帮助手册 → 切页 → 等待 3 秒 → 原 PDF XPath 属性断言”的 8 步顺序：
+
+| 会话模式 | 显示窗口 | 步骤 6 切页 | 步骤 7 等待 | 步骤 8 属性断言 | 结果 |
+| --- | --- | --- | --- | --- | --- |
+| `isolated` | 否 | 631ms | 3610ms | 632ms | 8/8 通过 |
+| `isolated` | 是 | 631ms | 3650ms | 663ms | 8/8 通过 |
+| `reuse-browser` | 否 | 610ms | 3604ms | 650ms | 8/8 通过 |
+| `reuse-browser` | 是 | 645ms | 3642ms | 661ms | 8/8 通过 |
+
+四种组合中，步骤 6–8 的每张实时 JPEG 均通过旧窗口像素排除检查；已目视确认保存的截图显示 PDF 正文和 Viewer。属性实际值为 `application/x-google-chrome-pdf`，定位来源为 `pdf_viewer_frame`。额外验证内部 frame 延迟加载可以成功，错误期望和其他窗口的 PDF 必须失败。
+
+验证命令与结果：
+
+- `npm run check`：通过。
+- `npm run test:pdf`：6/6 通过，包含四种执行组合与 frame / 断言反例测试。
+- `npm run test:locator`：24/24 通过，包含相关 mock 用例回放。
+- `npm run test:session`：3/3 通过。
+- `npm run test:export`：1/1 通过，生成的 Playwright / Pytest 脚本均实际执行。
+- `npm run test:unit`：101/102 通过。唯一失败为既有 `operation-diagnostics.test.js:72` 的固定字段数断言 `133 !== 127`；Admin 已暂存的六个数据库方法各增加了 `sql_mode`。本轮未修改该目录或计数测试，不将其记作全量通过。
+- 在 `sakura-admin` 执行 `mvn -pl continew-automation -am -DskipTests -Dspotless.skip=true -Dspotless.apply.skip=true compile`：5 个 reactor 模块编译通过，未运行后端测试，未触发格式化。
+
+产物：`artifacts/pdf-viewer-regression/run-9eEPW3/`。各 `<isolated|reuse-browser>-<headless|headed>/` 子目录包含 `runner.log`、`reported-result.json`、`step-6.jpg`、`step-7.jpg`、`step-8.jpg` 和原生报告 / trace；独立模式同时保存 video。产物不提交 Git。
+
+### 验收边界与复跑
+
+尝试只读获取原用例 `887372631722952167:SCENE_CASE_001` 时，当前配置的 Admin API 返回 `ECONNREFUSED`。本轮未触发真实产品执行、未回写原场景 `debugRecord`，也未验证真实 admin-ui 面板；本地真实浏览器结果不能替代产品环境验收。恢复服务后按操作手册的“PDF 帮助手册窗口回放与复验”，在原产品环境分别执行有头、无头模式并记录新的执行 ID。
+
+本轮未改动 `sakura-cuecast`、Admin / admin-ui 业务代码或 Jenkins 默认入口；原始 `playwright_step`、`locator_meta` 与既有未提交工作均保留。应用修复需更新 Runner 代码并确认已安装完整 Chromium，无数据库迁移。
 
 ## 2026-08-31：条件点击开关状态保护
 

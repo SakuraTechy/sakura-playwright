@@ -19,8 +19,8 @@ const STEP_METADATA_KEYS = new Set([
 ]);
 
 /**
- * 一个用例执行只创建一个变量上下文，绝不能复用进程级 Map。
- * 变量值只在步骤运行时内存中存在，结果中仅输出经过截断的非敏感预览。
+ * 每个 Runner 进程创建独立上下文，绝不能复用进程级 Map。
+ * 同场景批次通过受控临时快照传递变量；结果中仅输出经过截断的非敏感预览。
  */
 export class VariableContext {
   constructor(initialValues = {}) {
@@ -131,6 +131,16 @@ export class VariableContext {
       ...(metadata.masked ? {} : { value_preview: preview(value) }),
       source: metadata.source || '',
     };
+  }
+
+  snapshot() {
+    // 原始值和脱敏标记必须一起传递；该快照仅供受控临时文件使用，不能进入报告或日志。
+    return [...this.values].map(([name, value]) => ({
+      name,
+      value,
+      masked: Boolean(this.metadata.get(name)?.masked),
+      source: this.metadata.get(name)?.source || 'step',
+    }));
   }
 
   parseReference(reference) {

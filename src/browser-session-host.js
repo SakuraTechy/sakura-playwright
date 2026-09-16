@@ -22,6 +22,8 @@ async function main() {
   const browser = await browserTypes[browserName].launch({
     headless: !headed,
     slowMo,
+    // 共享浏览器同样保留 PDF Viewer，不能回退到只触发下载的 headless shell。
+    ...(browserName === 'chromium' ? { channel: 'chromium' } : {}),
     ...(launchArgs.length ? { args: launchArgs } : {}),
   });
   const recordingStartedAt = Date.now();

@@ -10,7 +10,7 @@ import { resolveLiveFrameQualityPreset, startLiveFramePublisher } from './runner
 import { LOADING_WAIT_WALL_MS, resolvePageErrorCheckEnabled } from './runner/page-state-diagnostics.js';
 import { createBrowserActionContext, runStep } from './runner/step-runner.js';
 import { createInfrastructureTaskCancellation, hasBrowserSteps } from './runner/infrastructure-step-runner.js';
-import { createVariableContext } from './runner/variable-context.js';
+import { loadVariableContext, saveVariableContext } from './runner/variable-state.js';
 import { attachOperationDiagnosticIfEnabled } from './runner/operation-diagnostics.js';
 import { getPlaywrightCapabilities } from './runner/action-registry.js';
 import {
@@ -114,7 +114,8 @@ async function main() {
     const testCaseRaw = await api.getTestCase(config.caseId);
     if (caseTimedOut) throw new RunnerError('CASE_TIMEOUT', `Case execution timed out after ${config.caseTimeoutMs}ms`);
     const testCase = normalizeCase(testCaseRaw, { caseId: config.caseId, startStep: config.startStep });
-    variableContext = createVariableContext(testCase.initial_variables || testCase.initialVariables || {});
+    variableContext = await loadVariableContext(config, testCase.initial_variables || testCase.initialVariables || {});
+    if (config.variableStateInput) executionLogger.info('variable', '已加载当前场景批次变量', true);
     const containsBrowserSteps = hasBrowserSteps(testCase.steps);
     config.pageErrorCheckEnabled = resolvePageErrorCheckEnabled(config.pageErrorCheckEnabled, testCase);
     executionLogger.success('case', `用例加载完成，共 ${testCase.steps.length} 个步骤`);
@@ -229,7 +230,12 @@ async function main() {
         args: launchArgs,
       });
     } else {
-      const launchOptions = { headless: !config.headed, slowMo: config.slowMoMs };
+      const launchOptions = {
+        headless: !config.headed,
+        slowMo: config.slowMoMs,
+        // 使用带 PDF Viewer 的完整 Chromium，使有头和无头执行读取同一页面 DOM。
+        ...(config.browser === 'chromium' ? { channel: 'chromium' } : {}),
+      };
       if (launchArgs.length) launchOptions.args = launchArgs;
       browser = await browserTypes[config.browser].launch(launchOptions);
       context = await browser.newContext(contextOptions);
@@ -382,7 +388,11 @@ async function main() {
             attachNetworkRecorder(openedPage, networkEvents);
           },
           onActionPreview: config.jobId && config.adminApi
-            ? (_previewPage, _previewStep, presentation) => liveFramePublisher?.captureNow(presentation)
+            ? (previewPage, _previewStep, presentation) => {
+              // 切页步骤返回前，定时帧和失败截图也必须使用新的活动页。
+              activePage = previewPage;
+              return liveFramePublisher?.captureNow(presentation, previewPage);
+            }
             : undefined,
           onActionPreviewError: (error) => {
             if (actionPreviewWarningReported) return;
@@ -421,6 +431,7 @@ async function main() {
           if (config.headed && activePage) await activePage.bringToFront().catch(() => {});
         }
         applyInfrastructureVariables(runtimeStep, stepResult, variableContext);
+        applyDownloadFileVariable(runtimeStep, stepResult, variableContext);
         attachStepVariableReferences(stepResult, runtimeVariableReferences);
         result.steps.push(attachOperationDiagnosticIfEnabled(stepResult, step, runtimeStep, {
           executor: 'playwright',
@@ -516,6 +527,15 @@ async function main() {
       } catch (error) {
         markRunFailed(result, error);
         executionLogger.error('session', `批次登录态保存失败：${error?.message || String(error)}`);
+      }
+    }
+    if (result?.success && !caseTimedOut && variableContext && config.variableStateOutput) {
+      try {
+        await saveVariableContext(config, variableContext);
+        executionLogger.info('variable', '场景批次变量候选已生成，等待服务端确认提交', true);
+      } catch (error) {
+        markRunFailed(result, error);
+        executionLogger.error('variable', error.message);
       }
     }
     if (config.finishDelayMs > 0 && context) {
@@ -865,6 +885,29 @@ function applyInfrastructureVariables(step, stepResult, variableContext) {
     masked: step?.value_masked === true || step?.value_masked === 'true' || step?.value_masked === 1 || step?.value_masked === '1',
     overwrite: step?.overwrite !== false && step?.overwrite !== 'false',
     source: 'infrastructure',
+  });
+  attachStepVariableResult(stepResult, variable);
+}
+
+/**
+ * 浏览器下载仅在当前执行工作目录内有效。变量保存完整文件引用供后续上传使用，
+ * 但默认脱敏，避免将 Runner 本地绝对路径写入执行报告。
+ */
+function applyDownloadFileVariable(step, stepResult, variableContext) {
+  if (!['assert_download', 'assert_download_existing'].includes(String(step?.action_type || '').trim().toLowerCase())) return;
+  const variableName = String(step?.variable_name || step?.result_binding || '').trim();
+  if (!variableName || !stepResult?.downloaded_file) return;
+  const variable = variableContext.set(variableName, {
+    path: stepResult.downloaded_file,
+    downloaded_file: stepResult.downloaded_file,
+    file_name: stepResult.downloaded_filename || '',
+    size: stepResult.downloaded_bytes ?? 0,
+    sha256: stepResult.downloaded_sha256 || '',
+    mime: stepResult.downloaded_mime || '',
+  }, {
+    masked: true,
+    overwrite: step?.overwrite !== false && step?.overwrite !== 'false',
+    source: String(step?.action_type || '').trim().toLowerCase(),
   });
   attachStepVariableResult(stepResult, variable);
 }

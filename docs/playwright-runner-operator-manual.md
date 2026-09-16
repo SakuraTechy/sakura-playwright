@@ -47,7 +47,7 @@ CDP/Runner 执行链路中的开始时间、结束时间、诊断日志时间和
 - Windows PowerShell。
 - Node.js `20+`。
 - npm。
-- Chromium 浏览器，由 Playwright 安装。
+- 完整 Chromium 浏览器，由 Playwright 安装；PDF 帮助手册回放不能只安装 `chromium-headless-shell`。
 
 可选环境：
 
@@ -253,12 +253,33 @@ node src/batch.js --case-ids <ids> --api-base <apiBase> --workers 1 --session-mo
 
 `reuse-browser` 只在同一批次内复用 Browser、Context、标签页、sessionStorage 和页面内存。首条用例打开录制起点；后续用例若仍在同源非登录业务页，则直接从当前页面继续。跨域、当前处于登录页、用例失败、取消或批次结束时不会沿用该页面状态。录屏可选 `on`、`off` 或 `retain-on-failure`；共享宿主先录制一段原生 WebM，批次完成后使用 `ffmpeg` 按用例时间边界生成各用例视频。`retain-on-failure` 只保留失败用例切片；`on` 保留所有用例切片。
 
+## 同一场景跨用例变量（2026-09-08）
+
+Admin 托管的 Runner 批次会把前序成功用例保存的变量传给后续用例，例如用例 003 保存 `passwd`，用例 004 用 `${passwd}` 或 `{{passwd}}` 输入密码。共享范围严格限定为同一 `batchId`、场景和产品环境，`isolated`、`reuse-auth`、`reuse-browser` 三种浏览器会话模式均支持；独立登录仍创建独立浏览器，不会因共享变量而共享登录态。
+
+生效与复验：
+
+1. 同步更新 `sakura-admin/continew-automation` 和 `sakura-playwright`，按现有方式重新编译并重启 Admin；Runner 每条用例启动新进程，无需单独常驻重启。无数据库迁移，不需要改录制步骤或前端。
+2. 在场景详情重新发起一个批次，按原顺序执行保存变量和引用变量的用例。旧批次已经丢失的内存变量不会从执行日志或报告中恢复；如用例 003 依赖用例 001/002，选择完整场景执行。
+3. 在详细日志中确认前序用例出现“场景批次变量已提交，可供后续用例使用”，后续用例出现“已加载当前场景批次变量”，密码输入不再报 `VARIABLE_NOT_FOUND`。
+4. 本地独立回归：在 `sakura-playwright` 目录执行 `npm run check`、`npm run test:scene-variables`。要求 Node.js 20+ 和完整 Chromium（缺失时执行 `npm exec -- playwright install chromium`）；测试使用临时模拟 Admin API 和真实浏览器，不访问原产品环境。结果、报告和日志保存到 `artifacts/scene-variables-regression/run-*/`，三种会话模式各有独立目录。
+
+状态和安全边界：
+
+- 每个进程保持独立 `VariableContext`，跨进程传递的是受控临时快照，不是全局进程缓存。前序成功输出优先于后续用例的同名初始默认值，`overwrite=false` 仍会拒绝覆盖已有变量。
+- 只有进程成功、结果回传成功且未取消，Admin 才原子提交候选。失败或取消的用例不覆盖上一份成功状态；不同批次、场景和产品环境互不读取。Admin 同一批次串行执行，避免变量读写竞争。
+- 原始值与 `masked/source` 一起保留，敏感变量不会因跨用例传递变成明文预览。配置密码变量时仍应设置 `value_masked=1`。
+- 临时文件复用 `automation.playwright-runner.session-state-dir`（未配置时为 Java 临时目录下的 `sakura-playwright-sessions`），变量位于 `<batchId>/<projectEnvironmentId>/variables/<sceneKey>/`。批次终态或取消后清理，异常遗留沿用 `session-state-retention-hours` 策略。不要把临时文件复制到 artifact、Git 或问题报告。
+- `SAKURA_PLAYWRIGHT_VARIABLE_STATE_IN/OUT` 仅由 Admin 子进程环境注入，不要写入 `.env` 或前端请求。无托管状态的独立 CLI、旧 `batch.js`/Jenkins 和导出脚本保留既有变量隔离行为。
+
 ## 在 admin 添加下载校验步骤
 
 在 UI 自动化场景详情中新增步骤，选择：
 
 - 操作类型：`检查操作`
 - 操作方法：`点击并校验浏览器下载文件`
+
+如果前一步已经执行了普通点击并触发下载，也可以选择单独的 `校验浏览器下载文件`。该方法不需要填写下载按钮，不会再次点击页面元素，只校验当前用例中已捕获的浏览器下载文件。
 
 填写项：
 
@@ -273,6 +294,8 @@ node src/batch.js --case-ids <ids> --api-base <apiBase> --workers 1 --session-mo
 
 `MIME 类型包含` 按下载请求的响应标头 `Content-Type` 填写，不是请求上传格式。动态文件名只出现在 `Content-Disposition` 时，Runner 也会据此匹配下载响应；例如响应标头为 `Content-Type: multipart/form-data`，该字段就填写 `multipart/form-data`。
 
+单独校验方法只填写“文件名包含”及其他校验字段。它从当前用例已捕获的下载事件中按文件名匹配最近一个文件；如果前面没有触发并捕获下载，会返回“没有找到可校验的浏览器下载文件”。
+
 该步骤会先监听 Playwright `download` 事件，再点击下载元素，等待下载完成后保存并执行断言。Playwright 不操作 Chromium 顶部工具栏或 Windows“另存为”窗口；`acceptDownloads` 会接管下载并保存到当前用例产物目录：
 
 ```text
@@ -282,6 +305,54 @@ artifacts/runs/<projectShortName>/<versionName>/<sceneId>/<caseId>/<yyyyMMdd>/<e
 平台模式会把下载文件与报告、日志、`result.json` 一起上传到 admin，并保留 `downloads/<原文件名>`、`logs/<日志名>` 等逻辑相对路径。空的 `dom/`、`screenshots/` 目录不会在 admin 端创建；步骤结果中的 `downloaded_file` 会替换为受鉴权的 admin 文件地址。
 
 校验文件内容时，文本文件填写“文件内容包含”；Excel、PDF 等二进制文件使用 SHA256。执行成功后可在 `result.json` 的 `steps[].downloaded_file`、`downloaded_filename`、`downloaded_bytes`、`downloaded_mime` 和 `downloaded_sha256` 中查看结果。
+
+## PDF 帮助手册窗口回放与复验
+
+适用流程：点击“帮助手册”打开 Blob PDF 新窗口 → “切换当前最新窗口” → 等待 3 秒 → 检查 PDF 元素属性。已有录制步骤可以保留，不需要修改 `playwright_step` 或 `locator_meta`。
+
+Runner 的独立浏览器和 `reuse-browser` 共享宿主均使用完整 Chromium 的有头／无头实现。请使用前文的 `npm exec -- playwright install chromium` 安装，不能以 `--only-shell` 安装代替。
+
+步骤约定：
+
+- `switch_page` 的 `value` 留空时选择最新窗口；显式窗口索引、URL 和标题匹配仍按原配置执行。
+- `wait` 的 `value` 为 `3000` 时实际等待 3000ms；步骤耗时还包含实时截图和已有的步骤后等待，不要求精确等于 3000ms。
+- `assert_attribute` 的原始 `target_xpath` 为 `//embed[@type='application/x-google-chrome-pdf']`，`attribute` 为 `type`，`expect` 为 `application/x-google-chrome-pdf`。Runner 仅为这个明确的 PDF XPath 在当前窗口的内部 frame / Shadow DOM 中查找等价元素，并读取真实属性。
+- 没有找到 PDF 元素时返回 `LOCATOR_NOT_FOUND`；实际属性不等于期望值时返回 `ASSERTION_FAILED`。历史 PDF 下载或其他窗口里的 PDF 不能让当前窗口的属性断言通过。
+
+### 本地自动回归
+
+在 `sakura-playwright` 根目录执行：
+
+```powershell
+npm run test:pdf
+```
+
+测试会启动临时本地模拟 Admin API，以真实 Chromium 执行完整 8 步，覆盖 `isolated` / `reuse-browser` × 有头 / 无头四种组合。不读取真实业务账号，不向真实 Admin 回写结果。有头验证需要可用桌面；无桌面的 Linux 环境需提供 Xvfb，例如 `xvfb-run -a npm run test:pdf`。
+
+通过标准：每种组合均 8/8 步骤通过；等待步骤在 3–6 秒内完成；属性断言小于 4 秒且定位来源为 `pdf_viewer_frame`；步骤 6、7、8 的实时 JPEG 均来自新窗口，不是旧业务页。另有内部 frame 延迟加载、错误期望和其他窗口隔离的反例测试。
+
+测试输出以下本地产物（不提交 Git）：
+
+```text
+artifacts/pdf-viewer-regression/run-<随机标识>/<isolated|reuse-browser>-<headless|headed>/
+  runner.log
+  reported-result.json
+  step-6.jpg
+  step-7.jpg
+  step-8.jpg
+  artifacts/
+  logs/
+```
+
+`artifacts/` 保存原生结果、HTML 报告和 trace；`isolated` 两种模式额外启用 video。共享浏览器回归关闭 video，避免把视频切片工具作为 PDF 测试前提。请打开步骤截图目视确认 PDF 正文，不能只看用例最终状态。
+
+### 原始产品用例人工复验
+
+1. 启动 Admin 和 Runner 执行服务，打开 `AAS_DBSG_SMOKE_003 / SCENE_CASE_001`，选择原产品环境，不更改原始录制数据。
+2. 保持原来的 `reuse-browser` 会话策略，先关闭“显示浏览器窗口”执行一次，再开启执行一次；两次都打开实时画面。
+3. 检查步骤 6 后画面已显示 PDF；步骤 7 的倒计时和实际耗时正常；步骤 8 为真实属性断言通过。
+4. 在每次的 `result.json` 中核对 `steps[5].switched_page_url`、`steps[6].wait_duration_ms`、`steps[6].duration_ms`、`steps[7].locator_source` 与 `steps[7].details.operation.outcome.assertion.actual.preview`，并记录执行 ID。
+5. 如果仅发生下载或 PDF 元素不存在，应如实失败；不要把下载记录当作页面断言的替代证据。Admin API 无法连接时先恢复服务，本地模拟通过不能替代原产品环境验收。
 
 ## 查看执行产物
 

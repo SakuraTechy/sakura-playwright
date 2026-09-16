@@ -42,6 +42,8 @@ export async function renderPytest(testCase, config) {
     'try:',
     '    cuecast_pages = [page]',
     '    cuecast_variables = {}',
+    '    cuecast_downloads = []',
+    '    page.on("download", lambda download: cuecast_downloads.append(download))',
     '    network_events = []',
     '',
     '    def attach_network_recorder(target_page):',
@@ -131,6 +133,8 @@ function renderStep(prepared) {
       return renderFileUpload(locator, value);
     case 'assert_download':
       return [`    cuecast_assert_download(page, ${locator}, ${pyValue(parseJsonLoose(value))})`];
+    case 'assert_download_existing':
+      return [`    cuecast_assert_existing_download(cuecast_downloads, ${pyValue(parseJsonLoose(value))})`];
     case 'assert_json':
       return renderAssertJson(step, locator, suffix);
     case 'assert_request':
@@ -241,7 +245,7 @@ function renderElementMatch(step, locator, suffix) {
   const actualName = `cuecast_assertion_actual_${suffix}`;
   const expectedName = `cuecast_assertion_expected_${suffix}`;
   const lines = [
-    `    ${actualName} = str(cuecast_read_element_value(${locator}, ${quotePy(step.read_mode || 'auto')}))`,
+    `    ${actualName} = str(cuecast_read_element_value(${locator}, ${quotePy(step.read_mode || 'auto')}, ${quotePy(step.attribute || '')}))`,
     `    ${expectedName} = ${renderRuntimePyString(step.expect ?? step.value ?? '')}`,
   ];
   if (matchMode === 'contains') lines.push(`    assert ${expectedName} in ${actualName}`);
@@ -425,15 +429,39 @@ function escapeDoc(value) {
 }
 
 const PYTEST_HELPERS = [
-  'def cuecast_read_element_value(locator, raw_read_mode):',
+  'def cuecast_read_element_value(locator, raw_read_mode, raw_attribute=""):',
   '    read_mode = str(raw_read_mode or "auto").lower()',
+  '    attribute = str(raw_attribute or "").strip()',
+  '    if read_mode not in {"auto", "text", "attribute", "value"}: raise RuntimeError(f"Unsupported element read_mode: {read_mode}")',
+  '    if read_mode == "attribute" and not attribute: raise RuntimeError("元素属性断言缺少属性名")',
   '    locator.wait_for(state="attached")',
-  '    return locator.evaluate("""(node, mode) => {',
+  '    result = locator.evaluate("""(node, payload) => {',
+  '        const mode = payload.mode;',
   '        const tagName = String(node.tagName || "").toLowerCase();',
   '        const effectiveMode = mode === "auto" && ["input", "textarea", "select"].includes(tagName) ? "value" : mode;',
   '        if (effectiveMode === "value") return "value" in node ? node.value : "";',
-  '        return typeof node.innerText === "string" ? node.innerText : (node.textContent || "");',
-  '    }""", read_mode)',
+  '        if (effectiveMode === "attribute") {',
+  '            let attributePresent = node.hasAttribute(payload.attribute);',
+  '            let value = "";',
+  '            if (!attributePresent && payload.attribute) {',
+  '                const attrLower = payload.attribute.toLowerCase();',
+  '                if (attrLower === "src") { value = node.currentSrc || node.src || ""; if (value) attributePresent = true; }',
+  '                else if (attrLower === "href") { value = node.href || ""; if (value) attributePresent = true; }',
+  '                else if (attrLower === "checked" && typeof node.checked === "boolean") { value = String(node.checked); attributePresent = true; }',
+  '                else if (attrLower === "disabled" && typeof node.disabled === "boolean") { value = String(node.disabled); attributePresent = true; }',
+  '                else if (attrLower === "readonly" && typeof node.readOnly === "boolean") { value = String(node.readOnly); attributePresent = true; }',
+  '                else if (attrLower === "selected" && typeof node.selected === "boolean") { value = String(node.selected); attributePresent = true; }',
+  '                else if (attrLower === "aria-checked") { value = node.getAttribute("aria-checked") || ""; if (value) attributePresent = true; }',
+  '                else if (attrLower === "aria-disabled") { value = node.getAttribute("aria-disabled") || ""; if (value) attributePresent = true; }',
+  '            }',
+  '            if (!attributePresent) return { attribute_present: false, value: "" };',
+  '            if (!value) value = node.getAttribute(payload.attribute) || "";',
+  '            return { attribute_present: true, value };',
+  '        }',
+  '        return { attribute_present: true, value: typeof node.innerText === "string" ? node.innerText : (node.textContent || "") };',
+  '    }""", {"mode": read_mode, "attribute": attribute})',
+  '    if read_mode == "attribute" and result.get("attribute_present") is not True: raise RuntimeError(f"目标元素不存在属性：{attribute}")',
+  '    return result.get("value", result) if isinstance(result, dict) else result',
   '',
   '',
   'def cuecast_read_element_state(locator):',
@@ -796,6 +824,26 @@ const PYTEST_HELPERS = [
   '            assert expected["contains"] in handle.read()',
   '    if expected.get("sha256"):',
   '        assert cuecast_file_sha256(save_path) == expected["sha256"].lower()',
+  '',
+  '',
+  'def cuecast_assert_existing_download(downloads, config):',
+  '    expected = cuecast_download_expected(config)',
+  '    download = next((item for item in reversed(downloads) if not expected.get("filename") or expected["filename"].lower() in item.suggested_filename.lower()), None)',
+  '    if not download:',
+  '        raise AssertionError("没有找到可校验的浏览器下载文件")',
+  '    filename = download.suggested_filename',
+  '    download_dir = os.path.join(os.getcwd(), "test-results", "cuecast-downloads")',
+  '    os.makedirs(download_dir, exist_ok=True)',
+  '    save_path = os.path.join(download_dir, cuecast_sanitize_filename(filename or "download"))',
+  '    download.save_as(save_path)',
+  '    size = os.path.getsize(save_path)',
+  '    if expected.get("filename"): assert expected["filename"] in filename',
+  '    if expected.get("minBytes") is not None: assert size >= int(expected["minBytes"])',
+  '    if expected.get("maxBytes") is not None: assert size <= int(expected["maxBytes"])',
+  '    if expected.get("mime"): assert expected["mime"].lower() in cuecast_guess_mime_type(save_path).lower()',
+  '    if expected.get("contains"):',
+  '        with open(save_path, "r", encoding="utf-8") as handle: assert expected["contains"] in handle.read()',
+  '    if expected.get("sha256"): assert cuecast_file_sha256(save_path) == expected["sha256"].lower()',
   '',
   '',
   'def cuecast_download_expected(config):',

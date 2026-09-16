@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import { createBrowserActionContext, runStep } from '../../src/runner/step-runner.js';
 
@@ -73,6 +76,42 @@ test('canonical input, selection, upload and assertion actions use Playwright pr
   assert.equal(page.locator('#certificate').inputFiles[0].endsWith('cert.pem'), true);
 });
 
+test('storage-managed upload downloads the execution-bound file before setting the input', async () => {
+  const page = new FakePage({ '#upload': new FakeLocator({ tag: 'input', attributes: { type: 'file' } }) });
+  const browserContext = createBrowserActionContext();
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sakura-upload-'));
+  const downloads = [];
+  try {
+    const result = await runStep(page, testCase, {
+      id: 'UPLOAD_STORAGE',
+      step_index: 0,
+      action_type: 'file_upload',
+      target_selector: '#upload',
+      file_ref: {
+        type: 'admin_execution_file',
+        file_name: 'backup.zip',
+        download_path: '/automation/playwright/testcases/SCENE/CASE/execution-files/UPLOAD_STORAGE',
+      },
+    }, stepOptions(browserContext, {
+      artifacts: { runDir },
+      api: {
+        downloadExecutionFile: async (downloadPath, targetPath) => {
+          downloads.push({ downloadPath, targetPath });
+          await fs.writeFile(targetPath, 'archive');
+        },
+      },
+    }));
+
+    assert.equal(downloads.length, 1);
+    assert.equal(downloads[0].downloadPath.endsWith('/UPLOAD_STORAGE'), true);
+    assert.equal(path.basename(downloads[0].targetPath), 'backup.zip');
+    assert.equal(page.locator('#upload').inputFiles[0], downloads[0].targetPath);
+    assert.equal(result.uploaded_files[0], downloads[0].targetPath);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
 test('legacy locator assertion failure preserves the selected locator', async () => {
   const page = new FakePage({ '#message': new FakeLocator({ tag: 'div', text: '实际内容' }) });
   const browserContext = createBrowserActionContext();
@@ -141,6 +180,175 @@ test('conditional click can require a configured element to exist', async () => 
 
   assert.equal(result.status, 'passed');
   assert.equal(clicks, 1);
+});
+
+test('empty switch_page configuration selects the latest page', async () => {
+  const page = new FakePage();
+  const popup = new FakePage();
+  const browserContext = createBrowserActionContext();
+  const result = await runStep(page, testCase, {
+    id: 'SWITCH_LATEST', step_index: 0, action_type: 'switch_page', value: '',
+  }, stepOptions(browserContext, {
+    getPages: () => [page, popup],
+  }));
+
+  assert.equal(result._activePage, popup);
+  assert.equal(result.switched_page_index, 1);
+});
+
+test('PDF 属性断言读取内部 frame 的真实元素，保留原始 step', async () => {
+  const page = new FakePage();
+  const browserContext = createBrowserActionContext();
+  const embed = new FakeLocator({ tag: 'embed', attributes: { type: 'application/x-google-chrome-pdf' } });
+  page.frames = () => [{
+    url: () => 'chrome-extension://pdf-viewer/index.html',
+    locator: (selector) => {
+      assert.equal(selector, 'embed[type="application/x-google-chrome-pdf"]');
+      return embed;
+    },
+  }];
+  const step = {
+    id: 'PDF_ATTRIBUTE',
+    step_index: 0,
+    action_type: 'assert_attribute',
+    target_xpath: "//embed[@type='application/x-google-chrome-pdf']",
+    attribute: 'type',
+    expect: 'application/x-google-chrome-pdf',
+    locator_meta: { locators: [{ type: 'xpath_fallback', value: "//embed[@type='application/x-google-chrome-pdf']" }] },
+  };
+  const original = structuredClone(step);
+  const result = await runStep(page, testCase, step, stepOptions(browserContext));
+
+  assert.equal(result.status, 'passed');
+  assert.equal(result.pdf_viewer_fallback, undefined);
+  assert.equal(result.locator_source, 'pdf_viewer_frame');
+  assert.equal(result.operation_assertion.actual.preview, 'application/x-google-chrome-pdf');
+  assert.deepEqual(step, original);
+
+  await assert.rejects(runStep(page, testCase, { ...step, expect: 'wrong-type' }, stepOptions(browserContext)), {
+    code: 'ASSERTION_FAILED',
+  });
+});
+
+test('属性断言实际值保留长 data URL 的前后摘要', async () => {
+  const page = new FakePage({
+    '#image': new FakeLocator({
+      tag: 'img',
+      attributes: { src: `data:image/jpg;base64,${'a'.repeat(2_048)}` },
+    }),
+  });
+  const browserContext = createBrowserActionContext();
+  const actual = page.locator('#image').attributes.src;
+
+  const result = await runStep(page, testCase, {
+    id: 'LONG_ATTRIBUTE',
+    step_index: 0,
+    action_type: 'assert_attribute',
+    target_selector: '#image',
+    attribute: 'src',
+    expect: actual,
+  }, stepOptions(browserContext));
+
+  assert.equal(result.operation_assertion.actual.preview.slice(0, 480), actual.slice(0, 480));
+  assert.equal(result.operation_assertion.actual.preview.slice(-480), actual.slice(-480));
+  assert.match(result.operation_assertion.actual.preview, /\.\.\.\[已省略 \d+ 字符\]\.\.\./);
+});
+
+test('当前页面没有 PDF 元素时，历史下载不能使属性断言误通过', async () => {
+  const page = new FakePage();
+  const browserContext = createBrowserActionContext({ defaultTimeoutMs: 30 });
+  browserContext.downloads = [{ suggestedFilename: 'help.pdf' }];
+  await assert.rejects(runStep(page, testCase, {
+    id: 'NO_PDF', step_index: 0, action_type: 'assert_attribute',
+    target_xpath: "//embed[@type='application/x-google-chrome-pdf']",
+    attribute: 'type', expect: 'application/x-google-chrome-pdf',
+  }, stepOptions(browserContext)), {
+    code: 'LOCATOR_NOT_FOUND',
+  });
+});
+
+test('独立下载校验只读取已捕获下载，不查找或点击页面元素', async () => {
+  const page = new FakePage();
+  const browserContext = createBrowserActionContext();
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sakura-download-assert-'));
+  const download = {
+    suggestedFilename: () => 'report.xlsx',
+    saveAs: async (targetPath) => fs.writeFile(targetPath, '导出成功'),
+  };
+  browserContext.downloadRecords.push({
+    download,
+    responseMime: 'application/vnd.ms-excel; charset=UTF-8',
+    capturedAt: Date.now(),
+  });
+  try {
+    const result = await runStep(page, testCase, {
+      id: 'ASSERT_DOWNLOAD',
+      step_index: 0,
+      action_type: 'assert_download_existing',
+      value: JSON.stringify({ filename: 'report.xlsx', mime: 'application/vnd.ms-excel', contains: '导出成功' }),
+    }, stepOptions(browserContext, { artifacts: { runDir } }));
+
+    assert.equal(result.status, 'passed');
+    assert.equal(result.downloaded_filename, 'report.xlsx');
+    assert.equal(await fs.readFile(result.downloaded_file, 'utf8'), '导出成功');
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test('独立下载校验在没有响应 MIME 时保留 Excel 兼容类型', async () => {
+  const page = new FakePage();
+  const browserContext = createBrowserActionContext();
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sakura-download-mime-'));
+  const download = {
+    suggestedFilename: () => 'report.xlsx',
+    saveAs: async (targetPath) => fs.writeFile(targetPath, '导出成功'),
+  };
+  browserContext.downloadRecords.push({ download, capturedAt: Date.now() });
+  try {
+    const result = await runStep(page, testCase, {
+      id: 'ASSERT_DOWNLOAD_MIME',
+      step_index: 0,
+      action_type: 'assert_download_existing',
+      value: JSON.stringify({ filename: 'report.xlsx', mime: 'application/vnd.ms-excel' }),
+    }, stepOptions(browserContext, { artifacts: { runDir } }));
+
+    assert.equal(result.status, 'passed');
+    assert.equal(result.downloaded_mime, 'application/vnd.ms-excel');
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test('独立下载校验可以从导出响应回退读取 Blob 文件', async () => {
+  const page = new FakePage();
+  const browserContext = createBrowserActionContext();
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sakura-response-download-'));
+  browserContext.downloadResponseRecords.push({
+    page,
+    response: {
+      body: async () => Buffer.from('导出成功'),
+    },
+    url: 'https://example.test/log/exportSystemLog?format=xlsx',
+    mime: 'application/octet-stream',
+    contentDisposition: '',
+    status: 200,
+    capturedAt: Date.now(),
+  });
+  try {
+    const result = await runStep(page, testCase, {
+      id: 'ASSERT_RESPONSE_DOWNLOAD',
+      step_index: 0,
+      action_type: 'assert_download_existing',
+      value: JSON.stringify({ filename: '.xlsx', mime: 'application/vnd.ms-excel', contains: '导出成功' }),
+    }, stepOptions(browserContext, { artifacts: { runDir } }));
+
+    assert.equal(result.status, 'passed');
+    assert.equal(result.downloaded_filename, 'download.xlsx');
+    assert.equal(result.downloaded_mime, 'application/vnd.ms-excel');
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
 });
 
 test('frame stack, pre-armed dialog and close-all-page actions retain browser-only safety boundaries', async () => {
@@ -229,6 +437,14 @@ class FakePage {
   url() {
     return 'http://example.test/';
   }
+
+  async title() {
+    return 'Example';
+  }
+
+  async bringToFront() {}
+
+  async waitForLoadState() {}
 
   mainFrame() {
     return this.main;

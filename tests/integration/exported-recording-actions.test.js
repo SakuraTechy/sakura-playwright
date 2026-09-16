@@ -71,6 +71,7 @@ function exportedRecordingCase() {
     '<div id="title">系统管理平台</div>',
     '<input id="account" value="admin-001">',
     '<input id="search">',
+    '<div id="state" class="icon-inner  running" style="width:1px;height:1px"></div>',
     '</body></html>',
   ].join('');
   return {
@@ -109,6 +110,7 @@ function exportedRecordingCase() {
         target_selector: '#search',
       },
       assertion(10, '#search', 'value', 'equals', '{{title}}'),
+      { step_index: 11, action_type: 'assert_element_match', target_selector: '#state', read_mode: 'attribute', attribute: 'class', match_mode: 'equals', expect: 'icon-inner  running' },
     ],
   };
 }

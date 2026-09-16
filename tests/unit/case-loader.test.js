@@ -141,6 +141,42 @@ test('CueCast 元素断言转换为统一匹配动作，普通文本断言保持
   assert.equal(legacy.original_action_type, undefined);
 });
 
+test('CueCast 属性断言保留属性名并转换为统一匹配动作', () => {
+  const [step] = normalizeSteps([{
+    id: 'RECORDED_ATTRIBUTE_ASSERT',
+    action_type: 'assert_text',
+    target_selector: '#state',
+    value: 'icon-inner running',
+    locator_meta: {
+      assertion: { target: 'element', match: 'equals' },
+      context: { assertion: { target: 'element', match: 'equals', source: 'attribute', attribute: 'class' } },
+    },
+  }]);
+
+  assert.equal(step.action_type, 'assert_element_match');
+  assert.equal(step.read_mode, 'attribute');
+  assert.equal(step.attribute, 'class');
+  assert.equal(step.expect, 'icon-inner running');
+});
+
+test('CueCast 属性断言优先保留 playwright_step 的 expect', () => {
+  const dataUrl = `data:image/jpg;base64,${'a'.repeat(2048)}`;
+  const [step] = normalizeSteps([{
+    id: 'RECORDED_ATTRIBUTE_DATA_URL',
+    action_type: 'assert_text',
+    target_selector: 'img.weixin-icon',
+    expect: dataUrl,
+    value: '',
+    locator_meta: {
+      assertion: { target: 'element', match: 'contains' },
+      context: { assertion: { target: 'element', match: 'contains', source: 'attribute', attribute: 'src' } },
+    },
+  }]);
+
+  assert.equal(step.action_type, 'assert_element_match');
+  assert.equal(step.expect, dataUrl);
+});
+
 test('CueCast 录制步骤结构不完整时返回带步骤身份的明确错误', () => {
   assert.throws(() => normalizeSteps([{
     id: 'RECORDED_VAR_INVALID',

@@ -71,6 +71,7 @@ export async function runStep(page, testCase, step, options = {}) {
   if (!isPlaywrightActionSupported(action)) {
     throw new RunnerError('UNSUPPORTED_STEP', `Unsupported action_type: ${step.action_type}`, { action_type: step.action_type });
   }
+  ensureDownloadCapture(page, options);
   let locatorInfo = null;
   let extra = {};
   let operationAssertion = null;
@@ -136,8 +137,9 @@ export async function runStep(page, testCase, step, options = {}) {
     }
 
     case 'switch_page': {
-      await showStepAction(page, step, null, options);
       extra = await switchPage(page, step.value, options);
+      // 切页动作的实时画面必须在目标页面上生成，否则上传的仍是旧窗口。
+      await showStepAction(extra._activePage, step, null, options);
       resetActiveFrame(options);
       break;
     }
@@ -298,6 +300,12 @@ export async function runStep(page, testCase, step, options = {}) {
       break;
     }
 
+    case 'assert_download_existing': {
+      await showStepAction(page, step, null, options);
+      extra = await assertExistingDownload(step.value, options);
+      break;
+    }
+
     case 'assert_json': {
       await showStepAction(page, step, null, options);
       locatorInfo = await runAssertJson(page, step, options);
@@ -412,14 +420,21 @@ export async function runStep(page, testCase, step, options = {}) {
     }
 
     case 'assert_attribute': {
-      locatorInfo = await resolveStepLocator(page, step, options);
-      await showStepAction(page, step, locatorInfo.locator, options);
-      operationAssertion = await runLocatorAction(
-        page,
-        locatorInfo,
-        options,
-        () => assertAttribute(locatorInfo.locator, step, options),
-      );
+      const pdfViewerResult = await tryPdfViewerAttribute(page, step, options);
+      if (pdfViewerResult) {
+        locatorInfo = pdfViewerResult.locatorInfo;
+        operationAssertion = pdfViewerResult.assertion;
+        await showStepAction(page, step, null, options);
+      } else {
+        locatorInfo = await resolveStepLocator(page, step, options);
+        await showStepAction(page, step, locatorInfo.locator, options);
+        operationAssertion = await runLocatorAction(
+          page,
+          locatorInfo,
+          options,
+          () => assertAttribute(locatorInfo.locator, step, options),
+        );
+      }
       break;
     }
 
@@ -644,6 +659,9 @@ export function createBrowserActionContext({ defaultTimeoutMs } = {}) {
     activeFrame: null,
     pointerPosition: { x: 0, y: 0 },
     dialogPlan: null,
+    downloadCapturePages: new WeakSet(),
+    downloadRecords: [],
+    downloadResponseRecords: [],
   };
 }
 
@@ -1370,7 +1388,15 @@ async function clickOpenPage(page, locator, options) {
 async function switchPage(currentPage, rawValue, options) {
   const config = parsePageActionConfig(rawValue);
   const pages = await getOpenPages(currentPage, options);
-  const targetPage = await selectPage(currentPage, config, options, pages);
+  const target = firstString(config.target, config.page, config.window);
+  const selectionConfig = !target && !hasPageMatcher(config)
+    ? {
+      ...config,
+      // browser.page.latest 没有表单字段，Admin 会把 value 留空；空值必须按最新窗口解释。
+      target: 'latest',
+    }
+    : config;
+  const targetPage = await selectPage(currentPage, selectionConfig, options, pages);
   await targetPage.bringToFront().catch(() => {});
   await targetPage.waitForLoadState('domcontentloaded', { timeout: Math.min(options.timeoutMs || 6000, 3000) }).catch(() => {});
   return {
@@ -1618,16 +1644,20 @@ async function runAssertElementMatch(locator, step, options) {
   }
 
   const expected = expectedFromStep(step);
-  const actual = await readElementAssertionValue(locator, step.read_mode, options.timeoutMs);
+  const readMode = String(step.read_mode || 'auto').trim().toLowerCase();
+  const actual = await readElementAssertionValue(locator, readMode, step.attribute, options.timeoutMs, step);
+  const attributeMode = readMode === 'attribute';
   switch (matchMode) {
     case 'contains':
-      assertContains(actual, expected, step);
+      if (attributeMode) assertRawContains(actual, expected, step, `元素属性 ${step.attribute}`);
+      else assertContains(actual, expected, step);
       break;
     case 'equals':
-      assertValueEquals(actual, expected, step, 'element value', true);
+      assertValueEquals(actual, expected, step, attributeMode ? `元素属性 ${step.attribute}` : 'element value', !attributeMode);
       break;
     case 'not_contains':
-      assertNotContains(actual, expected, step, 'element value');
+      if (attributeMode) assertRawNotContains(actual, expected, step, `元素属性 ${step.attribute}`);
+      else assertNotContains(actual, expected, step, 'element value');
       break;
     case 'regex':
       assertRegexMatch(actual, expected, step);
@@ -1635,21 +1665,57 @@ async function runAssertElementMatch(locator, step, options) {
     default:
       break;
   }
-  return createAssertion('页面元素', matchMode, expected, actual, matchMode === 'regex' ? 'regex' : 'text');
+  return createAssertion(attributeMode ? `元素属性 ${step.attribute}` : '页面元素', matchMode, expected, actual,
+    attributeMode ? 'attribute' : (matchMode === 'regex' ? 'regex' : 'text'));
 }
 
-async function readElementAssertionValue(locator, rawReadMode, timeoutMs) {
+async function readElementAssertionValue(locator, rawReadMode, rawAttribute, timeoutMs, step = {}) {
   const readMode = String(rawReadMode || 'auto').trim().toLowerCase();
-  if (!['auto', 'text', 'value'].includes(readMode)) {
+  if (!['auto', 'text', 'attribute', 'value'].includes(readMode)) {
     throw new RunnerError('METHOD_CONFIG_INVALID', `不支持的元素断言读取方式：${readMode || '(空)'}`);
   }
+  const attribute = String(rawAttribute || '').trim();
+  if (readMode === 'attribute' && !attribute) {
+    throw new RunnerError('METHOD_CONFIG_INVALID', '元素属性断言缺少属性名');
+  }
   await locator.waitFor({ state: 'attached', timeout: timeoutMs });
-  return locator.evaluate((node, mode) => {
+  const result = await locator.evaluate((node, payload) => {
+    const mode = payload.mode;
     const tagName = String(node.tagName || '').toLowerCase();
     const effectiveMode = mode === 'auto' && ['input', 'textarea', 'select'].includes(tagName) ? 'value' : mode;
     if (effectiveMode === 'value') return 'value' in node ? node.value : '';
-    return typeof node.innerText === 'string' ? node.innerText : (node.textContent || '');
-  }, readMode);
+    if (effectiveMode === 'attribute') {
+      let attributePresent = node.hasAttribute(payload.attribute);
+      let value = '';
+      if (!attributePresent && payload.attribute) {
+        const attrLower = payload.attribute.toLowerCase();
+        if (attrLower === 'src') { value = node.currentSrc || node.src || ''; if (value) attributePresent = true; }
+        else if (attrLower === 'href') { value = node.href || ''; if (value) attributePresent = true; }
+        else if (attrLower === 'checked' && typeof node.checked === 'boolean') { value = String(node.checked); attributePresent = true; }
+        else if (attrLower === 'disabled' && typeof node.disabled === 'boolean') { value = String(node.disabled); attributePresent = true; }
+        else if (attrLower === 'readonly' && typeof node.readOnly === 'boolean') { value = String(node.readOnly); attributePresent = true; }
+        else if (attrLower === 'selected' && typeof node.selected === 'boolean') { value = String(node.selected); attributePresent = true; }
+        else if (attrLower === 'aria-checked') { value = node.getAttribute('aria-checked') || ''; if (value) attributePresent = true; }
+        else if (attrLower === 'aria-disabled') { value = node.getAttribute('aria-disabled') || ''; if (value) attributePresent = true; }
+      }
+      if (!attributePresent) return { attribute_present: false, value: '' };
+      if (!value) value = node.getAttribute(payload.attribute) ?? '';
+      return { attribute_present: true, value };
+    }
+    return { attribute_present: true, value: typeof node.innerText === 'string' ? node.innerText : (node.textContent || '') };
+  }, { mode: readMode, attribute });
+  if (readMode === 'attribute') {
+    if (!result || result.attribute_present !== true) {
+      throw new RunnerError('ASSERTION_FAILED', `目标元素不存在属性：${attribute}`, {
+        step_id: step.id,
+        step_index: step.step_index,
+        attribute,
+        actual_preview: '属性不存在',
+      });
+    }
+    return result.value;
+  }
+  return result?.value ?? result ?? '';
 }
 
 async function assertAttribute(locator, step, options) {
@@ -1658,6 +1724,54 @@ async function assertAttribute(locator, step, options) {
   const actual = await locator.getAttribute(attribute, { timeout: options.timeoutMs });
   assertValueEquals(actual, expectedFromStep(step), step, `attribute ${attribute}`);
   return createAssertion(`元素属性 ${attribute}`, 'equals', expectedFromStep(step), actual);
+}
+
+async function tryPdfViewerAttribute(page, step, options) {
+  const targetXpath = String(step.target_xpath || '').trim();
+  if (!/^\/\/embed\[@type\s*=\s*['"]application\/x-google-chrome-pdf['"]\]$/.test(targetXpath)) {
+    return null;
+  }
+
+  // PDF Viewer 的 embed 位于内部 frame / Shadow DOM；只转换这一明确等价的选择器，
+  // 并读取当前页真实元素属性。下载事件或文件名不能证明页面属性断言成功。
+  const selector = 'embed[type="application/x-google-chrome-pdf"]';
+  const deadline = Date.now() + (positiveTimeout(options.timeoutMs) || 6000);
+  do {
+    for (const frame of page?.frames?.() || []) {
+      const locator = frame.locator(selector).first();
+      if (await locator.count().catch(() => 0) < 1) continue;
+      return {
+        locatorInfo: {
+          source: 'pdf_viewer_frame',
+          locatorType: 'css',
+          locatorValue: selector,
+          matchedCount: 1,
+          visibleCount: await locator.isVisible().catch(() => false) ? 1 : 0,
+          diagnostics: {
+            version: 1,
+            mode: 'pdf-viewer-frame',
+            outcome: 'resolved',
+            selected: {
+              source: 'pdf_viewer_frame',
+              type: 'css',
+              value: selector,
+              frame_url: frame.url(),
+              decision: 'frame-embed',
+            },
+          },
+        },
+        assertion: await assertAttribute(locator, step, { ...options, timeoutMs: Math.max(1, deadline - Date.now()) }),
+      };
+    }
+    if (page?.isClosed?.()) break;
+    await sleep(Math.min(100, Math.max(0, deadline - Date.now())));
+  } while (Date.now() < deadline);
+
+  throw new RunnerError('LOCATOR_NOT_FOUND', '当前页面未找到 Chrome PDF Viewer 元素，请确认已切换到打开帮助手册的窗口', {
+    step_id: step.id,
+    target_xpath: targetXpath,
+    frame_urls: (page?.frames?.() || []).map((frame) => frame.url()),
+  });
 }
 
 async function runAssertTextRegex(page, step, options, locatorInfo) {
@@ -1676,7 +1790,7 @@ async function runAssertTextRegex(page, step, options, locatorInfo) {
       step_id: step.id,
       step_index: step.step_index,
       regex: rawRegex.slice(0, 500),
-      actual_preview: String(actual ?? '').slice(0, 500),
+      actual_preview: previewAssertionValue(actual),
     });
   }
   return { locatorInfo, assertion: createAssertion('元素文本', 'regex_match', rawRegex, actual, 'regex') };
@@ -1694,8 +1808,14 @@ function createAssertion(subject, operator, expected, actual, expectedFormat = '
 
 function previewAssertionValue(value) {
   if (value == null) return '';
-  if (typeof value === 'object') return JSON.stringify(value).slice(0, 512);
-  return String(value).replace(/[\r\n]+/g, ' ').slice(0, 512);
+  const text = typeof value === 'object' ? JSON.stringify(value) : String(value).replace(/[\r\n]+/g, ' ');
+  if (!text || text.length <= 512) return text;
+  if (text.toLowerCase().startsWith('data:image/')) {
+    const headLength = 480;
+    const tailLength = 480;
+    return `${text.slice(0, headLength)}...[已省略 ${text.length - headLength - tailLength} 字符]...${text.slice(-tailLength)}`;
+  }
+  return text.slice(0, 512);
 }
 
 function hasLocator(step) {
@@ -1758,6 +1878,32 @@ function assertContains(actual, expected, step) {
   }
 }
 
+function assertRawContains(actual, expected, step, subject) {
+  const actualText = String(actual ?? '');
+  const expectedText = String(expected ?? '');
+  if (!actualText.includes(expectedText)) {
+    throw new RunnerError('ASSERTION_FAILED', `Expected ${subject} was not found: ${expectedText.slice(0, 200)}`, {
+      step_id: step.id,
+      step_index: step.step_index,
+      expected: expectedText.slice(0, 500),
+      actual_preview: actualText.slice(0, 500),
+    });
+  }
+}
+
+function assertRawNotContains(actual, expected, step, subject) {
+  const actualText = String(actual ?? '');
+  const expectedText = String(expected ?? '');
+  if (actualText.includes(expectedText)) {
+    throw new RunnerError('ASSERTION_FAILED', `Expected ${subject} not to contain value`, {
+      step_id: step.id,
+      step_index: step.step_index,
+      unexpected: expectedText.slice(0, 500),
+      actual_preview: actualText.slice(0, 500),
+    });
+  }
+}
+
 function normalizeAssertionText(value) {
   return String(value ?? '')
     .normalize('NFKC')
@@ -1769,7 +1915,7 @@ function normalizeAssertionText(value) {
 
 async function uploadFiles(page, locator, rawValue, options) {
   const config = parseFileUploadConfig(rawValue);
-  const files = config.files;
+  const files = await Promise.all(config.files.map((file) => resolveFileReference(file, options)));
   if (!files.length) {
     throw new RunnerError('UNSUPPORTED_CONTROL', 'file_upload requires at least one file path');
   }
@@ -1832,28 +1978,30 @@ async function resolveUploadInput(page, locator, config, options) {
 }
 
 function parseFileUploadConfig(rawValue) {
-  if (Array.isArray(rawValue)) return { files: rawValue.map(resolveFileReference), inputSelector: '', raw: rawValue };
+  if (Array.isArray(rawValue)) return { files: rawValue, inputSelector: '', raw: rawValue };
   if (rawValue && typeof rawValue === 'object') return fileUploadConfigFromObject(rawValue);
   const value = String(rawValue ?? '').trim();
   if (!value) return { files: [], inputSelector: '', raw: rawValue };
   try {
     const parsed = JSON.parse(value);
-    if (Array.isArray(parsed)) return { files: parsed.map(resolveFileReference), inputSelector: '', raw: parsed };
+    if (Array.isArray(parsed)) return { files: parsed, inputSelector: '', raw: parsed };
     if (parsed && typeof parsed === 'object') return fileUploadConfigFromObject(parsed);
   } catch {
     // Fall through to comma-separated paths.
   }
-  return { files: value.split(',').map((item) => item.trim()).filter(Boolean).map(resolveLocalPath), inputSelector: '', raw: rawValue };
+  return { files: value.split(',').map((item) => item.trim()).filter(Boolean), inputSelector: '', raw: rawValue };
 }
 
 function fileUploadConfigFromObject(config) {
-  const rawFiles = Array.isArray(config.files)
+  const rawFiles = String(config.type || '').trim() === 'admin_execution_file'
+    ? [config]
+    : Array.isArray(config.files)
     ? config.files
     : firstPresent(config.file, config.path, config.file_path, config.filePath, config.local_path, config.localPath) != null
       ? [firstPresent(config.file, config.path, config.file_path, config.filePath, config.local_path, config.localPath)]
       : [];
   return {
-    files: rawFiles.map(resolveFileReference),
+    files: rawFiles,
     inputSelector: String(config.inputSelector || config.input_selector || '').trim(),
     raw: config,
   };
@@ -1878,10 +2026,15 @@ function resolveLocalPath(filePath) {
   return path.isAbsolute(value) ? value : path.resolve(process.cwd(), value);
 }
 
-function resolveFileReference(fileReference) {
+async function resolveFileReference(fileReference, options = {}) {
+  if (fileReference && typeof fileReference === 'object'
+    && String(fileReference.type || '').trim() === 'admin_execution_file') {
+    return downloadExecutionFile(fileReference, options);
+  }
   const rawPath = fileReference && typeof fileReference === 'object'
     ? firstPresent(
       fileReference.path,
+      fileReference.downloaded_file,
       fileReference.file_path,
       fileReference.filePath,
       fileReference.local_path,
@@ -1897,6 +2050,64 @@ function resolveFileReference(fileReference) {
   return resolveLocalPath(value);
 }
 
+async function downloadExecutionFile(fileReference, options) {
+  const api = options.api;
+  const downloadPath = String(fileReference.download_path || fileReference.downloadPath || '').trim();
+  if (!api?.downloadExecutionFile || !downloadPath) {
+    throw new RunnerError('FILE_REFERENCE_UNRESOLVED', 'admin_execution_file requires Admin API and download_path');
+  }
+  const downloadsRoot = path.join(options.artifacts?.runDir || process.cwd(), 'input-files');
+  await fs.mkdir(downloadsRoot, { recursive: true });
+  const fileName = sanitizeFilename(String(fileReference.file_name || fileReference.fileName || 'input-file'));
+  const targetPath = await availableDownloadPath(downloadsRoot, fileName);
+  await api.downloadExecutionFile(downloadPath, targetPath);
+  return targetPath;
+}
+
+async function availableDownloadPath(directory, fileName) {
+  const extension = path.extname(fileName);
+  const baseName = extension ? fileName.slice(0, -extension.length) : fileName;
+  for (let index = 1; ; index += 1) {
+    const candidate = path.join(directory, index === 1 ? fileName : `${baseName} (${index})${extension}`);
+    try {
+      await fs.access(candidate);
+    } catch {
+      return candidate;
+    }
+  }
+}
+
+function ensureDownloadCapture(page, options) {
+  const context = browserContextFor(options);
+  if (!page || typeof page.on !== 'function' || context.downloadCapturePages.has(page)) return;
+  context.downloadCapturePages.add(page);
+  page.on('response', (response) => {
+    const headers = response.headers?.() || {};
+    const mime = responseHeader(headers, 'content-type');
+    const contentDisposition = responseHeader(headers, 'content-disposition');
+    if (!mime && !contentDisposition) return;
+    context.downloadResponseRecords.push({
+      page,
+      response,
+      url: String(response.url?.() || ''),
+      mime,
+      contentDisposition,
+      status: Number(response.status?.() || 0),
+      capturedAt: Date.now(),
+    });
+    if (context.downloadResponseRecords.length > 200) context.downloadResponseRecords.shift();
+  });
+  page.on('download', (download) => {
+    const url = String(download.url?.() || '');
+    const response = [...context.downloadResponseRecords].reverse().find((item) => item.page === page && item.url === url);
+    context.downloadRecords.push({
+      download,
+      responseMime: response?.mime || '',
+      capturedAt: Date.now(),
+    });
+  });
+}
+
 async function assertDownload(page, locator, rawValue, options) {
   const expected = parseDownloadExpected(rawValue);
   const downloadsDir = path.join(options.artifacts?.runDir || process.cwd(), 'downloads');
@@ -1910,6 +2121,9 @@ async function assertDownload(page, locator, rawValue, options) {
     locator.click({ timeout: options.timeoutMs }),
   ]);
   const responseMime = await responseWaiter.promise;
+  const context = browserContextFor(options);
+  const record = [...(context.downloadRecords || [])].reverse().find((item) => item.download === download);
+  if (record && responseMime) record.responseMime = responseMime;
   const suggestedFilename = download.suggestedFilename();
   if (expected.filename && !suggestedFilename.includes(expected.filename)) {
     throw new RunnerError('ASSERTION_FAILED', `Downloaded filename did not match: ${expected.filename}`, {
@@ -1920,7 +2134,116 @@ async function assertDownload(page, locator, rawValue, options) {
 
   const savePath = path.join(downloadsDir, sanitizeFilename(suggestedFilename || `download-${Date.now()}`));
   await download.saveAs(savePath);
-  const downloadedMime = String(responseMime || guessMimeType(savePath));
+  const downloadedMime = resolveDownloadedMime(responseMime || record?.responseMime, savePath, expected);
+  return assertDownloadedFile(savePath, suggestedFilename, expected, downloadedMime);
+}
+
+async function assertExistingDownload(rawValue, options) {
+  const expected = parseDownloadExpected(rawValue);
+  const context = browserContextFor(options);
+  const record = [...(context.downloadRecords || [])].reverse().find((item) => {
+    const filename = String(item.download?.suggestedFilename?.() || '').trim();
+    return !expected.filename || filename.toLowerCase().includes(expected.filename.toLowerCase());
+  });
+  if (record?.download) {
+    const suggestedFilename = record.download.suggestedFilename();
+    const downloadsDir = path.join(options.artifacts?.runDir || process.cwd(), 'downloads');
+    await fs.mkdir(downloadsDir, { recursive: true });
+    const savePath = await availableDownloadPath(
+      downloadsDir,
+      sanitizeFilename(suggestedFilename || `download-${Date.now()}`),
+    );
+    await record.download.saveAs(savePath);
+    return assertDownloadedFile(savePath, suggestedFilename, expected, resolveDownloadedMime(record?.responseMime, savePath, expected));
+  }
+
+  const responseRecord = findDownloadResponseRecord(context, expected);
+  if (responseRecord?.response) {
+    const suggestedFilename = responseFilename(responseRecord.contentDisposition, expected.filename);
+    const downloadsDir = path.join(options.artifacts?.runDir || process.cwd(), 'downloads');
+    await fs.mkdir(downloadsDir, { recursive: true });
+    const savePath = await availableDownloadPath(
+      downloadsDir,
+      sanitizeFilename(suggestedFilename || `download-${Date.now()}`),
+    );
+    const body = await responseRecord.response.body().catch((error) => {
+      throw new RunnerError('ASSERTION_FAILED', `无法读取已捕获的下载响应：${error?.message || error}`, {
+        expected_filename: expected.filename || null,
+        response_url: responseRecord.url,
+      });
+    });
+    await fs.writeFile(savePath, body);
+    return assertDownloadedFile(savePath, suggestedFilename, expected, resolveDownloadedMime(responseRecord.mime, savePath, expected));
+  }
+
+  if (!record?.download) {
+    throw new RunnerError('ASSERTION_FAILED', '没有找到可校验的浏览器下载文件', {
+      expected_filename: expected.filename || null,
+    });
+  }
+}
+
+function findDownloadResponseRecord(context, expected) {
+  return [...(context.downloadResponseRecords || [])].reverse().find((record) => {
+    if (!isDownloadLikeResponse(record)) return false;
+    if (expected.url && !urlMatches(record.url, expected.url)) return false;
+    if (!expected.filename) return true;
+    const expectedFilename = expected.filename.toLowerCase();
+    const actualFilename = responseFilename(record.contentDisposition, '').toLowerCase();
+    if (actualFilename && actualFilename.includes(expectedFilename)) return true;
+    if (String(record.url || '').toLowerCase().includes(expectedFilename)) return true;
+    // 后端常用随机 URL 返回文件，只有扩展名配置时无法从 URL 判断文件名。
+    return expectedFilename.startsWith('.') && Boolean(record.mime);
+  });
+}
+
+function isDownloadLikeResponse(record) {
+  const mime = String(record?.mime || '').toLowerCase();
+  const url = String(record?.url || '').toLowerCase();
+  return Boolean(record?.contentDisposition)
+    || /octet-stream|ms-excel|spreadsheet|application\/pdf|zip/.test(mime)
+    || /download|export|attachment/.test(url);
+}
+
+function responseFilename(contentDisposition, expectedFilename) {
+  const header = String(contentDisposition || '');
+  const encoded = header.match(/filename\*\s*=\s*[^']*''([^;]+)/i)?.[1];
+  const quoted = header.match(/filename\s*=\s*["']([^"']+)["']/i)?.[1];
+  const plain = header.match(/filename\s*=\s*([^;]+)/i)?.[1];
+  const filename = encoded || quoted || plain;
+  if (filename) {
+    try {
+      return decodeURIComponent(filename.trim());
+    } catch {
+      return filename.trim();
+    }
+  }
+  const expected = String(expectedFilename || '').trim();
+  if (expected.startsWith('.')) return `download${expected}`;
+  return expected || `download-${Date.now()}`;
+}
+
+function resolveDownloadedMime(observedMime, filePath, expected) {
+  const observed = String(observedMime || '').trim();
+  const fallback = guessMimeType(filePath);
+  const expectedMime = String(expected?.mime || '').toLowerCase();
+  const isExcel = ['.xls', '.xlsx'].includes(path.extname(filePath).toLowerCase());
+  // 部分导出接口返回 octet-stream；Excel 文件仍兼容历史的 application/vnd.ms-excel 断言。
+  if (isExcel && observed.toLowerCase().startsWith('application/octet-stream')
+    && expectedMime && !expectedMime.includes('octet-stream')) {
+    return fallback;
+  }
+  return observed || fallback;
+}
+
+async function assertDownloadedFile(savePath, suggestedFilename, expected, downloadedMime) {
+  if (expected.filename && !suggestedFilename.includes(expected.filename)) {
+    throw new RunnerError('ASSERTION_FAILED', `Downloaded filename did not match: ${expected.filename}`, {
+      expected_filename: expected.filename,
+      actual_filename: suggestedFilename,
+    });
+  }
+
   if (expected.mime) {
     const actualMime = downloadedMime.toLowerCase();
     if (!actualMime.includes(expected.mime.toLowerCase())) {
@@ -2064,6 +2387,8 @@ function guessMimeType(filePath) {
   if (ext === '.png') return 'image/png';
   if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
   if (ext === '.pdf') return 'application/pdf';
+  // Excel 下载兼容历史断言配置，响应头可用时仍优先使用响应中的真实 MIME。
+  if (ext === '.xls' || ext === '.xlsx') return 'application/vnd.ms-excel';
   return 'application/octet-stream';
 }
 

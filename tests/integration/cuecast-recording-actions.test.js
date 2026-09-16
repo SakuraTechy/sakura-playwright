@@ -66,6 +66,31 @@ test('CueCast 五种元素断言读取文本或表单值并输出结构化结果
   await page.close();
 });
 
+test('CueCast 元素断言按属性读取运行时值，保留原始空白并拒绝缺失属性', async () => {
+  const page = await browser.newPage();
+  await page.setContent('<div id="state" class="icon-inner  running" style="width:1px;height:1px"></div><div id="empty" title="" style="width:1px;height:1px"></div>');
+
+  const [attributeStep] = normalizeSteps([recordedAssertion(20, {
+    selector: '#state',
+    match: 'equals',
+    source: 'attribute',
+    attribute: 'class',
+    expected: 'icon-inner  running',
+  })]);
+  const result = await runStep(page, {}, attributeStep, runnerOptions());
+  assert.equal(result.operation_assertion.passed, true);
+  assert.equal(result.operation_assertion.subject, '元素属性 class');
+  assert.equal(result.operation_assertion.expected.format, 'attribute');
+
+  await assert.rejects(() => runStep(page, {}, {
+    ...attributeStep,
+    id: 'MISSING_ATTRIBUTE',
+    attribute: 'data-status',
+    expect: 'running',
+  }, runnerOptions()), { code: 'ASSERTION_FAILED' });
+  await page.close();
+});
+
 test('CueCast 可见断言对唯一隐藏元素返回断言失败而不是误判通过', async () => {
   const page = await browser.newPage();
   await page.setContent('<div id="hidden" style="display:none">secret</div>');
@@ -80,16 +105,17 @@ test('CueCast 可见断言对唯一隐藏元素返回断言失败而不是误判
   await page.close();
 });
 
-function recordedAssertion(index, { selector, match, source, expected }) {
+function recordedAssertion(index, { selector, match, source, attribute, expected }) {
   return {
     id: `RECORDED_ASSERTION_${index}`,
     step_index: index,
     action_type: 'assert_text',
     target_selector: selector,
     value: expected,
+    ...(attribute ? { attribute } : {}),
     locator_meta: {
       assertion: { target: 'element', match },
-      context: { assertion: { target: 'element', match, source } },
+      context: { assertion: { target: 'element', match, source, ...(attribute ? { attribute } : {}) } },
     },
   };
 }

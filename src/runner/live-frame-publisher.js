@@ -1,4 +1,5 @@
 const DEFAULT_INTERVAL_MS = 1000;
+const SCREENSHOT_TIMEOUT_MS = 3000;
 const LIVE_FRAME_PRESENTATION_PREFIX = 'SAKURA_FOCUS:';
 const LIVE_FRAME_QUALITY_PRESETS = Object.freeze({
   smooth: Object.freeze({ deviceScaleFactor: 1, jpegQuality: 65, intervalMs: 1000 }),
@@ -36,7 +37,7 @@ export function startLiveFramePublisher({
   let presentationSequence = 0;
   let currentPresentation = normalizeLiveFramePresentation();
 
-  const capture = async ({ ensureFresh = false, presentation } = {}) => {
+  const capture = async ({ ensureFresh = false, presentation, targetPage } = {}) => {
     if (!active) return;
     if (presentation !== undefined) {
       const nextPresentation = presentation?.preserveFocus
@@ -53,10 +54,10 @@ export function startLiveFramePublisher({
     }
     if (capturePromise) {
       await capturePromise.catch(() => {});
-      if (ensureFresh && active) await capture();
+      if (ensureFresh && active) await capture({ targetPage });
       return;
     }
-    const page = getPage?.();
+    const page = targetPage || getPage?.();
     if (!page || page.isClosed()) return;
     const framePresentation = { ...currentPresentation };
     const framePresentationSequence = presentationSequence;
@@ -68,6 +69,7 @@ export function startLiveFramePublisher({
           quality: jpegQuality,
           scale: 'device',
           fullPage: false,
+          timeout: SCREENSHOT_TIMEOUT_MS,
         });
         await api.pushLiveFrame(jobId, appendLiveFramePresentation(frame, framePresentation));
         if (framePresentation.ripple && framePresentationSequence === presentationSequence) {
@@ -93,7 +95,7 @@ export function startLiveFramePublisher({
 
   return {
     // 步骤动作通常短于定时截图间隔；动作前强制抓取新帧，确保虚拟鼠标不会被跳过。
-    captureNow: (presentation) => capture({ ensureFresh: true, presentation }),
+    captureNow: (presentation, targetPage) => capture({ ensureFresh: true, presentation, targetPage }),
     stop: async () => {
       active = false;
       clearInterval(timer);

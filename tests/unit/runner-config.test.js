@@ -6,7 +6,7 @@ import test from 'node:test';
 import { ApiClient } from '../../src/api/api-client.js';
 import { cleanupLocalRunArtifacts, createRunArtifacts } from '../../src/reporting/artifacts.js';
 import { createExecutionLogger, EXECUTION_LOG_PREFIX, formatStepLogLabel } from '../../src/reporting/execution-logger.js';
-import { buildStepActionPresentation, formatStepActionLabel } from '../../src/runner/action-visualizer.js';
+import { buildStepActionPresentation, formatStepActionLabel, showStepAction } from '../../src/runner/action-visualizer.js';
 import {
   appendLiveFramePresentation,
   extractLiveFramePresentation,
@@ -136,6 +136,7 @@ test('live frame publisher applies the selected jpeg quality and device pixel sc
     quality: 82,
     scale: 'device',
     fullPage: false,
+    timeout: 3000,
   });
 });
 
@@ -177,6 +178,57 @@ test('live frame publisher can force a fresh frame before a short step action', 
   assert.equal(presentations[2].ripple, false);
   assert.equal(presentations[2].focusScale, 1.75);
   assert.equal(presentations[2].pointer, true);
+});
+
+test('切页预览等待旧帧完成后仍截取指定的新页面', async () => {
+  let finishOldCapture;
+  const pendingOldCapture = new Promise((resolve) => { finishOldCapture = resolve; });
+  const screenshots = [];
+  const jpeg = Buffer.from([0xFF, 0xD8, 0xFF, 0xD9]);
+  const originalPage = {
+    isClosed: () => false,
+    screenshot: async () => { screenshots.push('old'); await pendingOldCapture; return jpeg; },
+  };
+  const newPage = {
+    isClosed: () => false,
+    screenshot: async () => { screenshots.push('new'); return jpeg; },
+  };
+  const publisher = startLiveFramePublisher({
+    api: { adminApi: true, pushLiveFrame: async () => {} },
+    jobId: 'SWITCH_PAGE', getPage: () => originalPage, intervalMs: 60000,
+  });
+  try {
+    const switched = publisher.captureNow({ label: '切换窗口' }, newPage);
+    finishOldCapture();
+    await switched;
+    assert.deepEqual(screenshots, ['old', 'new']);
+  } finally {
+    finishOldCapture();
+    await publisher.stop();
+  }
+});
+
+test('动作绘制失败也发送目标页面，且装饰定位最多等待一秒', async () => {
+  let previewPage;
+  let previewError;
+  const page = {
+    isClosed: () => false,
+    viewportSize: () => ({ width: 1280, height: 720 }),
+    locator: (selector) => {
+      assert.equal(selector, ':root');
+      return { evaluate: async (_fn, _payload, options) => {
+        assert.equal(options.timeout, 1000);
+        throw new Error('navigation in progress');
+      } };
+    },
+  };
+  await showStepAction(page, { action_type: 'switch_page' }, null, {
+    timeoutMs: 30000,
+    onActionPreview: async (target) => { previewPage = target; },
+    onActionPreviewError: (error) => { previewError = error; },
+  });
+  assert.equal(previewPage, page);
+  assert.match(previewError.message, /navigation/);
 });
 
 test('action preview label uses one-based sequence and recorded step name', () => {
