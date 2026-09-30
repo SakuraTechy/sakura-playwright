@@ -500,10 +500,26 @@ async function normalizeActionTarget(root, locator, actionType) {
   }
 
   if (kind.tag === 'input' && ['checkbox', 'radio'].includes(kind.type)) {
-    if (await locator.isVisible({ timeout: 0 }).catch(() => false)) return { locator, rule: '' };
     const wrapper = locator.locator(
       'xpath=ancestor::*[self::label or contains(concat(" ",normalize-space(@class)," ")," ivu-radio-wrapper ") or contains(concat(" ",normalize-space(@class)," ")," ant-radio-wrapper ") or contains(concat(" ",normalize-space(@class)," ")," el-radio ") or contains(concat(" ",normalize-space(@class)," ")," ivu-checkbox-wrapper ") or contains(concat(" ",normalize-space(@class)," ")," ant-checkbox-wrapper ") or contains(concat(" ",normalize-space(@class)," ")," el-checkbox ")][1]',
     );
+    const visible = await locator.isVisible({ timeout: 0 }).catch(() => false);
+    if (visible) {
+      // Element UI 等组件会让原生 input 保留可见尺寸，但用内部视觉节点覆盖中心点。
+      // 这种命中仍属于同一 label 控件，应点击可见 wrapper 而不是强制点击 input。
+      const centerCoveredByAssociatedLabel = await locator.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        if (!hit || hit === element || element.contains(hit) || hit.contains(element)) return false;
+        const label = typeof hit.closest === 'function' ? hit.closest('label') : null;
+        return Boolean(label && label.control === element);
+      }).catch(() => false);
+      if (!centerCoveredByAssociatedLabel) return { locator, rule: '' };
+      if (await wrapper.isVisible({ timeout: 0 }).catch(() => false)) {
+        return { locator: wrapper, rule: `${kind.type}-visible-wrapper` };
+      }
+    }
     if (await wrapper.isVisible({ timeout: 0 }).catch(() => false)) return { locator: wrapper, rule: `${kind.type}-visible-wrapper` };
     const id = await locator.getAttribute('id').catch(() => '');
     if (id) {

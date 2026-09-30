@@ -71,6 +71,34 @@ test('全局变量步骤结果包含脱敏后的变量执行详情', async () =>
   });
 });
 
+test('日期变量支持受限 script 偏移表达式', async () => {
+  const context = createVariableContext();
+  await runLocalVariableAction(null, {
+    action_type: 'global_variable_date',
+    variable_name: 'last_week',
+    date_mode: 'custom_datetime',
+    datetime: '2026-08-05T17:30:00+08:00',
+    format: 'yyyy-MM-dd HH:mm:ss',
+    script: '-60*60*24*7',
+  }, { variableContext: context });
+
+  assert.equal(context.get('last_week'), '2026-07-29 17:30:00');
+});
+
+test('日期变量 script 支持全局变量引用', async () => {
+  const context = createVariableContext({ days: 7 });
+  await runLocalVariableAction(null, {
+    action_type: 'global_variable_date',
+    variable_name: 'last_week',
+    date_mode: 'custom_datetime',
+    datetime: '2026-08-05T17:30:00+08:00',
+    format: 'yyyy-MM-dd HH:mm:ss',
+    script: '60*60*24*{{days}}',
+  }, { variableContext: context });
+
+  assert.equal(context.get('last_week'), '2026-08-12 17:30:00');
+});
+
 test('变量正则提取保留分组 0，并在捕获组不存在时明确失败', async () => {
   const context = createVariableContext();
   await runLocalVariableAction(null, {

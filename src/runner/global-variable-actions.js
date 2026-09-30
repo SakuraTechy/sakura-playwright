@@ -91,7 +91,10 @@ async function setVariable(page, step, options, context) {
 function setDateVariable(step, context) {
   const name = validateVariableName(step.variable_name);
   const mode = String(step.date_mode || 'current_datetime').trim().toLowerCase();
-  const offsetSeconds = finiteNumber(step.offset_seconds, 0);
+  const offsetExpression = step.script ?? step.offset_seconds;
+  const offsetSeconds = offsetExpression == null || String(offsetExpression).trim() === ''
+    ? 0
+    : evaluateArithmeticExpression(offsetExpression, context);
   const now = resolveDate(step, mode);
   now.setTime(now.getTime() + offsetSeconds * 1000);
   const unit = String(step.timestamp_unit || 'milliseconds').trim().toLowerCase();
@@ -221,11 +224,6 @@ function formatFormula(value, step) {
       : Number(value.toFixed(scale));
   }
   return value;
-}
-
-function finiteNumber(value, fallback) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function toBoolean(value) {

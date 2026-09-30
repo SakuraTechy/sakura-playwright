@@ -258,6 +258,44 @@ test('hidden Element-style checkbox is promoted to its visible label', async () 
   await page.close();
 });
 
+test('visible Element-style radio is promoted when its inner visual node covers the input center', async () => {
+  const page = await browser.newPage();
+  await page.setContent(`
+    <style>
+      label.el-radio { position: relative; display: inline-flex; width: 120px; height: 32px; align-items: center; }
+      .el-radio__input { position: relative; display: inline-block; width: 20px; height: 20px; }
+      .el-radio__original, .el-radio__inner { position: absolute; inset: 0; width: 20px; height: 20px; }
+      .el-radio__original { opacity: 0; margin: 0; }
+      .el-radio__inner { border: 1px solid #999; border-radius: 50%; box-sizing: border-box; }
+    </style>
+    <label class="el-radio">
+      <span class="el-radio__input">
+        <input class="el-radio__original" type="radio" name="level" value="medium">
+        <span class="el-radio__inner"></span>
+      </span>
+      <span>中</span>
+    </label>
+  `);
+  const step = {
+    id: 6,
+    step_index: 5,
+    action_type: 'click',
+    target_selector: 'label.el-radio > span.el-radio__input > input.el-radio__original',
+  };
+  const meta = {
+    version: 1,
+    candidates: [{ type: 'css_fallback', value: step.target_selector, score: 0.72 }],
+    context: { control_kind: 'input:radio', label_text: '中' },
+  };
+
+  const resolved = await resolveSemanticLocator(page, step, { timeoutMs: 500 }, meta);
+  await resolved.locator.click();
+
+  assert.equal(await page.locator('input').isChecked(), true);
+  assert.equal(resolved.diagnostics.selected.normalization_rule, 'radio-visible-wrapper');
+  await page.close();
+});
+
 test('CueCast CDP click promotes a same-level label for hidden table checkbox', async () => {
   const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
   await page.setContent(`

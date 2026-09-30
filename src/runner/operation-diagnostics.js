@@ -107,7 +107,7 @@ const ACTION_INPUTS = Object.freeze({
   implicit_wait: ['duration_ms', 'value'],
   captcha_ocr: ['target_ref', 'variable_name'],
   global_variable_set: ['variable_name', 'source_type', 'value', 'target_ref', 'read_mode', 'regex', 'regex_group', 'replace_from', 'replace_to'],
-  global_variable_date: ['variable_name', 'date_mode', 'format', 'datetime', 'offset_seconds', 'timestamp_unit'],
+  global_variable_date: ['variable_name', 'date_mode', 'format', 'datetime', 'offset_seconds', 'script', 'timestamp_unit'],
   global_variable_formula: ['variable_name', 'expression', 'scale', 'keep_trailing_zeros'],
   global_variable_system_info: ['variable_name', 'info_type'],
   global_variable_available_ip: ['variable_name', 'ip_prefix', 'start', 'end', 'timeout_ms'],
