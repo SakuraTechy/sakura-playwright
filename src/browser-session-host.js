@@ -2,9 +2,11 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { chromium, firefox, webkit } from 'playwright';
-import { parseBoolean, parseCliArgs, parseNonNegativeInt } from './shared/utils.js';
+import { parseBoolean, parseCliArgs, parseNonNegativeInt, parsePositiveInt } from './shared/utils.js';
 
 const browserTypes = { chromium, firefox, webkit };
+const DEFAULT_HEADED_CHROMIUM_VIDEO_SIZE = Object.freeze({ width: 1920, height: 991 });
+const DEFAULT_HEADLESS_VIDEO_SIZE = Object.freeze({ width: 1920, height: 1080 });
 
 async function main() {
   const args = parseCliArgs();
@@ -28,15 +30,14 @@ async function main() {
   });
   const recordingStartedAt = Date.now();
   const recordVideo = video === 'on' || video === 'retain-on-failure';
+  const videoSize = recordVideo ? resolveVideoSize({ headed, browserName }) : null;
   const context = await browser.newContext({
     ignoreHTTPSErrors,
-    ...(headed ? { viewport: null } : {}),
+    ...(headed ? { viewport: null } : (videoSize ? { viewport: videoSize } : {})),
     ...(recordVideo ? {
       recordVideo: {
         dir: path.dirname(path.resolve(recordingManifestFile || endpointFile)),
-        ...(headed && browserName === 'chromium'
-          ? { size: { width: 1920, height: 991 } }
-          : {}),
+        ...(videoSize ? { size: videoSize } : {}),
       },
     } : {}),
   });
@@ -65,7 +66,7 @@ async function main() {
           video_path: videoPath || null,
           started_at: recordingStartedAt,
           finished_at: Date.now(),
-          video_size: headed && browserName === 'chromium' ? { width: 1920, height: 991 } : null,
+          video_size: videoSize,
         }).catch(() => {});
       }
       await browser.close().catch(() => {});
@@ -79,6 +80,17 @@ async function main() {
     });
     browser.once('disconnected', resolve);
   });
+}
+
+function resolveVideoSize({ headed, browserName, env = process.env }) {
+  const configuredWidth = parsePositiveInt(env.RUNNER_VIDEO_WIDTH, 0);
+  const configuredHeight = parsePositiveInt(env.RUNNER_VIDEO_HEIGHT, 0);
+  if (configuredWidth > 0 && configuredHeight > 0) {
+    return { width: configuredWidth, height: configuredHeight };
+  }
+  if (headed && browserName === 'chromium') return { ...DEFAULT_HEADED_CHROMIUM_VIDEO_SIZE };
+  if (!headed) return { ...DEFAULT_HEADLESS_VIDEO_SIZE };
+  return null;
 }
 
 async function writeEndpoint(filePath, value) {

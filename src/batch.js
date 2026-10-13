@@ -89,6 +89,8 @@ function parseBatchArgs(argv = process.argv.slice(2), env = process.env) {
     workers,
     artifactDir: args['artifact-dir'] || mergedEnv.RUNNER_ARTIFACT_DIR || 'artifacts',
     ffmpegPath: args['ffmpeg-path'] || mergedEnv.FFMPEG_PATH || 'ffmpeg',
+    videoWidth: parsePositiveInt(mergedEnv.RUNNER_VIDEO_WIDTH, null),
+    videoHeight: parsePositiveInt(mergedEnv.RUNNER_VIDEO_HEIGHT, null),
   };
 }
 
@@ -259,7 +261,11 @@ async function startBrowserSession(session, config, activeChildren) {
   ];
   const host = spawn(process.execPath, args, {
     cwd: process.cwd(),
-    env: { ...process.env },
+    env: {
+      ...process.env,
+      ...(config.videoWidth ? { RUNNER_VIDEO_WIDTH: String(config.videoWidth) } : {}),
+      ...(config.videoHeight ? { RUNNER_VIDEO_HEIGHT: String(config.videoHeight) } : {}),
+    },
     windowsHide: true,
   });
   session.host = host;

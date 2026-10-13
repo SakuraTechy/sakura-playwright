@@ -612,6 +612,8 @@ RUNNER_BROWSER         chromium | firefox | webkit
 RUNNER_LOCATOR_MODE    legacy | semantic-v1
 RUNNER_PAGE_ERROR_CHECK_ENABLED 留空继承用例，true | false 为任务级覆盖
 RUNNER_HEADED          true | false
+RUNNER_VIDEO_WIDTH     批次原生录屏宽度；无头 reuse-browser 默认 1920
+RUNNER_VIDEO_HEIGHT    批次原生录屏高度；无头 reuse-browser 默认 1080
 RUNNER_TRACE           on | off | retain-on-failure
 RUNNER_VIDEO           on | off | retain-on-failure
 RUNNER_ARTIFACT_DIR    产物根目录

@@ -846,6 +846,8 @@ RUNNER_BROWSER         chromium | firefox | webkit，默认 chromium
 RUNNER_LOCATOR_MODE    legacy | semantic-v1，默认 legacy
 RUNNER_PAGE_ERROR_CHECK_ENABLED 留空继承用例，true | false 为任务级覆盖
 RUNNER_HEADED          true | false，默认 false
+RUNNER_VIDEO_WIDTH     批次原生录屏宽度，默认无头模式 1920
+RUNNER_VIDEO_HEIGHT    批次原生录屏高度，默认无头模式 1080
 RUNNER_TRACE           on | off | retain-on-failure，批量默认 retain-on-failure
 RUNNER_VIDEO           on | off | retain-on-failure；reuse-browser 按批次录制后切片
 RUNNER_ARTIFACT_DIR    产物根目录，默认 playwright-runner-artifacts
