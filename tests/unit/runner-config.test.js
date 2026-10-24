@@ -180,6 +180,49 @@ test('live frame publisher can force a fresh frame before a short step action', 
   assert.equal(presentations[2].pointer, true);
 });
 
+test('live frame publisher preserves a queued step presentation after the previous frame finishes', async () => {
+  let finishFirstCapture;
+  const firstCapture = new Promise((resolve) => { finishFirstCapture = resolve; });
+  const presentations = [];
+  const jpeg = Buffer.from([0xFF, 0xD8, 0xFF, 0xD9]);
+  let screenshotCount = 0;
+  const publisher = startLiveFramePublisher({
+    api: {
+      adminApi: true,
+      pushLiveFrame: async (_jobId, frame) => presentations.push(extractLiveFramePresentation(frame)),
+    },
+    jobId: 'JOB_QUEUED_ACTION_PREVIEW',
+    getPage: () => ({
+      isClosed: () => false,
+      screenshot: async () => {
+        screenshotCount += 1;
+        if (screenshotCount === 1) await firstCapture;
+        return jpeg;
+      },
+    }),
+    intervalMs: 60000,
+  });
+
+  try {
+    const queuedCapture = publisher.captureNow({
+      label: '步骤 2 · 点击确定',
+      focusX: 0.5,
+      focusY: 0.5,
+      focusScale: 1.75,
+      pointer: true,
+      ripple: true,
+    });
+    finishFirstCapture();
+    await queuedCapture;
+    assert.equal(presentations.length, 2);
+    assert.equal(presentations[1].label, '步骤 2 · 点击确定');
+    assert.equal(presentations[1].ripple, true);
+  } finally {
+    finishFirstCapture();
+    await publisher.stop();
+  }
+});
+
 test('切页预览等待旧帧完成后仍截取指定的新页面', async () => {
   let finishOldCapture;
   const pendingOldCapture = new Promise((resolve) => { finishOldCapture = resolve; });

@@ -844,6 +844,7 @@ RUNNER_SESSION_MODE    isolated | reuse-auth | reuse-browser，默认 isolated
 RUNNER_STORAGE_STATE   单用例或批次的只读初始 storage state 文件
 RUNNER_BROWSER         chromium | firefox | webkit，默认 chromium
 RUNNER_LOCATOR_MODE    legacy | semantic-v1，默认 legacy
+RUNNER_LOADING_WAIT_WALL_MS semantic-v1 页面加载状态最长等待时间，默认 180000 毫秒
 RUNNER_PAGE_ERROR_CHECK_ENABLED 留空继承用例，true | false 为任务级覆盖
 RUNNER_HEADED          true | false，默认 false
 RUNNER_VIDEO_WIDTH     批次原生录屏宽度，默认无头模式 1920

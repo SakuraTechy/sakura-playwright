@@ -54,7 +54,8 @@ export function startLiveFramePublisher({
     }
     if (capturePromise) {
       await capturePromise.catch(() => {});
-      if (ensureFresh && active) await capture({ targetPage });
+      // 等待旧帧完成后仍要携带当前步骤的 presentation，否则短步骤会显示上一帧标签。
+      if (ensureFresh && active) await capture({ ensureFresh: true, presentation, targetPage });
       return;
     }
     const page = targetPage || getPage?.();

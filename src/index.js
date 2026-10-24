@@ -7,7 +7,7 @@ import { chromium, firefox, webkit } from 'playwright';
 import { ApiClient } from './api/api-client.js';
 import { normalizeCase, resolveViewport, shouldLaunchMaximized } from './runner/case-loader.js';
 import { resolveLiveFrameQualityPreset, startLiveFramePublisher } from './runner/live-frame-publisher.js';
-import { LOADING_WAIT_WALL_MS, resolvePageErrorCheckEnabled } from './runner/page-state-diagnostics.js';
+import { resolvePageErrorCheckEnabled } from './runner/page-state-diagnostics.js';
 import { createBrowserActionContext, runStep } from './runner/step-runner.js';
 import { createInfrastructureTaskCancellation, hasBrowserSteps } from './runner/infrastructure-step-runner.js';
 import { loadVariableContext, saveVariableContext } from './runner/variable-state.js';
@@ -370,7 +370,7 @@ async function main() {
         const stepResult = await withTimeout(runStep(activePage, testCase, runtimeStep, {
           timeoutMs: config.timeoutMs,
           locatorMode: config.locatorMode,
-          locatorWallTimeoutMs: LOADING_WAIT_WALL_MS,
+          locatorWallTimeoutMs: config.loadingWaitWallMs,
           pageErrorCheckEnabled: config.pageErrorCheckEnabled,
           // 录制的 Element Select 搜索输入与选项点击是两个连续步骤；
           // Runner 需要看到下一步才能保持下拉层打开并复现原始语义。
@@ -423,8 +423,11 @@ async function main() {
             const logMethod = level === 'error' ? 'error' : level === 'warn' || level === 'warning' ? 'warning' : 'info';
             executionLogger[logMethod]('infrastructure', `任务 ${event.taskId}：${message}`, true);
           },
-        }), (config.locatorMode === 'semantic-v1' ? LOADING_WAIT_WALL_MS : config.timeoutMs)
-          + Math.max(0, step.wait_before), `Step ${step.step_index}`);
+        }), (config.locatorMode === 'semantic-v1' ? config.loadingWaitWallMs : config.timeoutMs)
+          + Math.max(0, step.wait_before)
+          + (step.action_type === 'wait'
+            ? (Number(step.value) || step.wait_before || 1000)
+            : 0), `Step ${step.step_index}`);
         if (Object.prototype.hasOwnProperty.call(stepResult, '_activePage')) {
           activePage = stepResult._activePage;
           delete stepResult._activePage;

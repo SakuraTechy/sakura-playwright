@@ -63,6 +63,13 @@ export function parseArgs(argv = process.argv.slice(2), env = process.env) {
     variableStateInput: env.SAKURA_PLAYWRIGHT_VARIABLE_STATE_IN || '',
     variableStateOutput: env.SAKURA_PLAYWRIGHT_VARIABLE_STATE_OUT || '',
     locatorMode: args['locator-mode'] || mergedEnv.RUNNER_LOCATOR_MODE || 'legacy',
+    loadingWaitWallMs: parseIntegerInRange(
+      mergedEnv.RUNNER_LOADING_WAIT_WALL_MS,
+      180000,
+      1000,
+      3600000,
+      'loading-wait-wall',
+    ),
     slowMoMs: parseIntegerInRange(args['slow-mo'] ?? mergedEnv.RUNNER_SLOW_MO_MS, 0, 0, 10000, 'slow-mo'),
     finishDelayMs: parseIntegerInRange(args['finish-delay'] ?? mergedEnv.RUNNER_FINISH_DELAY_MS, 0, 0, 600000, 'finish-delay'),
     timeoutMs: parseIntegerInRange(args.timeout ?? mergedEnv.RUNNER_STEP_TIMEOUT_MS, 6000, 1000, 300000, 'timeout'),
