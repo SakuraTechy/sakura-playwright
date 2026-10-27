@@ -2,10 +2,10 @@ const DEFAULT_INTERVAL_MS = 1000;
 const SCREENSHOT_TIMEOUT_MS = 3000;
 const LIVE_FRAME_PRESENTATION_PREFIX = 'SAKURA_FOCUS:';
 const LIVE_FRAME_QUALITY_PRESETS = Object.freeze({
-  smooth: Object.freeze({ deviceScaleFactor: 1, jpegQuality: 65, intervalMs: 1000 }),
-  high: Object.freeze({ deviceScaleFactor: 1.5, jpegQuality: 82, intervalMs: 1000 }),
-  ultra: Object.freeze({ deviceScaleFactor: 2, jpegQuality: 85, intervalMs: 1500 }),
-  '8k': Object.freeze({ deviceScaleFactor: 4, jpegQuality: 90, intervalMs: 3000 }),
+  smooth: Object.freeze({ deviceScaleFactor: 1, jpegQuality: 65, intervalMs: 500 }),
+  high: Object.freeze({ deviceScaleFactor: 1.5, jpegQuality: 82, intervalMs: 500 }),
+  ultra: Object.freeze({ deviceScaleFactor: 2, jpegQuality: 85, intervalMs: 750 }),
+  '8k': Object.freeze({ deviceScaleFactor: 4, jpegQuality: 90, intervalMs: 1500 }),
 });
 
 export function resolveLiveFrameQualityPreset(quality = 'smooth') {

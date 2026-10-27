@@ -89,22 +89,22 @@ test('live frame quality presets balance resolution compression and refresh inte
   assert.deepEqual(resolveLiveFrameQualityPreset('smooth'), {
     deviceScaleFactor: 1,
     jpegQuality: 65,
-    intervalMs: 1000,
+    intervalMs: 500,
   });
   assert.deepEqual(resolveLiveFrameQualityPreset('high'), {
     deviceScaleFactor: 1.5,
     jpegQuality: 82,
-    intervalMs: 1000,
+    intervalMs: 500,
   });
   assert.deepEqual(resolveLiveFrameQualityPreset('ultra'), {
     deviceScaleFactor: 2,
     jpegQuality: 85,
-    intervalMs: 1500,
+    intervalMs: 750,
   });
   assert.deepEqual(resolveLiveFrameQualityPreset('8k'), {
     deviceScaleFactor: 4,
     jpegQuality: 90,
-    intervalMs: 3000,
+    intervalMs: 1500,
   });
 });
 

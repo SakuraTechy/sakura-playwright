@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { formatPlatformDateTime, loadRunnerEnv, parseBoolean, parseCliArgs, parsePositiveInt, resolveAdminApiBase, resolveAdminApiEnabled, sleep, timestampForPath, trimTrailingSlash } from './shared/utils.js';
+import { formatDuration, formatPlatformDateTime, loadRunnerEnv, parseBoolean, parseCliArgs, parsePositiveInt, resolveAdminApiBase, resolveAdminApiEnabled, sleep, timestampForPath, trimTrailingSlash } from './shared/utils.js';
 import { promoteStorageState } from './runner/session-state.js';
 import { ApiClient } from './api/api-client.js';
 import { reportRunResult } from './reporting/result-reporter.js';
@@ -511,7 +511,7 @@ function renderBatchReport(summary) {
     <tr data-status="${escapeHtml(item.status)}">
       <td>${escapeHtml(item.case_id)}</td>
       <td>${escapeHtml(item.status)}</td>
-      <td>${escapeHtml(item.duration_ms)} ms</td>
+      <td>${escapeHtml(formatDuration(item.duration_ms))}</td>
       <td>${escapeHtml(item.failed_step_index ?? '-')}</td>
       <td>${artifactLink('result.json', item.result_json)}${artifactLink('report.html', item.artifacts?.report_html)}${artifactLink('screenshot', item.artifacts?.failure_screenshot)}${artifactLink('trace', item.artifacts?.trace)}${artifactLink('video', item.artifacts?.video)}</td>
       <td>${escapeHtml(item.error || '')}</td>

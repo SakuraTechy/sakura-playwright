@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { timestampForPath } from '../shared/utils.js';
+import { formatDuration, timestampForPath } from '../shared/utils.js';
 
 export async function createRunArtifacts({ artifactDir, caseId, testCase, runId: requestedRunId, timestamp = timestampForPath() }) {
   // 平台任务使用用例 executionId 关联 artifact；旧 CLI 未传值时再生成兼容 runId。
@@ -368,7 +368,7 @@ function renderHtmlReport(result) {
       <td>${escapeHtml(step.step_index)}</td>
       <td>${escapeHtml(step.action_type)}</td>
       <td>${escapeHtml(step.status)}</td>
-      <td>${escapeHtml(step.duration_ms)} ms</td>
+      <td>${escapeHtml(formatDuration(step.duration_ms))}</td>
       <td>${escapeHtml(step.locator_source || '')}</td>
       <td>${escapeHtml(step.error || '')}</td>
     </tr>
@@ -405,7 +405,7 @@ function renderHtmlReport(result) {
     <div class="metric"><span>Run</span><strong>${escapeHtml(result.run_id)}</strong></div>
     <div class="metric"><span>Status</span><strong>${escapeHtml(result.status)}</strong></div>
     <div class="metric"><span>Case</span><strong>${escapeHtml(result.case_id)}</strong></div>
-    <div class="metric"><span>Duration</span><strong>${escapeHtml(result.duration_ms)} ms</strong></div>
+    <div class="metric"><span>Duration</span><strong>${escapeHtml(formatDuration(result.duration_ms))}</strong></div>
   </div>
   <h2>Steps</h2>
   <table>

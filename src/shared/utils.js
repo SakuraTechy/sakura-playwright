@@ -290,6 +290,22 @@ export function durationMs(startedAt) {
   return Date.now() - startedAt;
 }
 
+// 用户可见耗时统一使用中文时分秒，零值单位不显示；结果字段仍保留毫秒供计算和接口传输。
+export function formatDuration(milliseconds) {
+  if (milliseconds === null || milliseconds === undefined || milliseconds === '') return '-';
+  const numericMilliseconds = Number(milliseconds);
+  if (!Number.isFinite(numericMilliseconds) || numericMilliseconds < 0) return '-';
+  const totalSeconds = Math.floor(numericMilliseconds / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const parts = [];
+  if (hours > 0) parts.push(`${hours}时`);
+  if (minutes > 0) parts.push(`${minutes}分`);
+  if (seconds > 0 || parts.length === 0) parts.push(`${seconds}秒`);
+  return parts.join('');
+}
+
 export function serializeError(error) {
   return {
     name: error?.name || 'Error',
